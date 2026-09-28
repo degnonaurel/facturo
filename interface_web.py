@@ -29,7 +29,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Request
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 
 import facture_vers_excel as fve
@@ -85,7 +85,9 @@ def statut():
 @app.post("/api/extraire")
 async def extraire(request: Request,
                    fichiers: list[UploadFile] = File(...),
-                   base: Optional[UploadFile] = File(None)):
+                   base: Optional[UploadFile] = File(None),
+                   langue: str = Form("fr")):
+    langue = "en" if langue == "en" else "fr"
     if not _reserver_quota(_visiteur(request), len(fichiers)):
         return JSONResponse({"quota_atteint": True}, status_code=429)
     factures, erreurs = [], []
@@ -119,12 +121,14 @@ async def extraire(request: Request,
         jeton = uuid.uuid4().hex
         chemin = os.path.join(_DOSSIER, f"facturo_{jeton}.xlsx")
         try:
-            fve.construire_excel(factures, chemin, base_excel=base_path)
+            fve.construire_excel(factures, chemin, base_excel=base_path, langue=langue)
         except Exception as e:
             # Excel de base illisible : on repart sur un fichier neuf.
             erreurs.append({"fichier": base.filename if base else "Excel existant",
-                            "message": f"Excel existant illisible, nouveau fichier créé ({e})"})
-            fve.construire_excel(factures, chemin)
+                            "message": (f"Existing Excel unreadable, new file created ({e})"
+                                        if langue == "en" else
+                                        f"Excel existant illisible, nouveau fichier créé ({e})")})
+            fve.construire_excel(factures, chemin, langue=langue)
         _TELECHARGEMENTS[jeton] = chemin
 
     resume = [{
@@ -132,7 +136,7 @@ async def extraire(request: Request,
         "date": f.date, "devise": f.devise, "total_ht": f.total_ht,
         "tps": f.tps, "tvq": f.tvq, "tva": f.tva, "total_ttc": f.total_ttc,
         "nb_lignes": len(f.lignes), "pieces_liees": f.pieces_liees,
-        "alertes": f.alertes,
+        "alertes": [fve.traduire_alerte(a, langue) for a in f.alertes],
     } for f in factures]
     return {"factures": resume, "erreurs": erreurs, "download_id": jeton,
             "ajoute": bool(base_path)}
@@ -438,6 +442,7 @@ btn.onclick=async()=>{
   etat.innerHTML='<span class="spin"></span> '+T('traitement');
   const fd=new FormData(); fichiers.forEach(f=>fd.append('fichiers',f,f.name));
   if(baseExcel)fd.append('base',baseExcel,baseExcel.name);
+  fd.append('langue',LANG);
   try{
     const r=await fetch('/api/extraire',{method:'POST',body:fd});
     if(r.status===429){dernier=null;errBox.textContent=T('quota');}

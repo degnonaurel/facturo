@@ -70,3 +70,13 @@ def test_quota_de_demo(tmp_path, monkeypatch):
     r = envoyer(1, "1.1.1.1")                    # 3e fichier du jour : refusé
     assert r.status_code == 429 and r.json()["quota_atteint"] is True
     assert envoyer(1, "2.2.2.2").status_code == 200   # autre visiteur : OK
+
+
+def test_langue_anglaise_via_web(tmp_path):
+    pdf = pdf_facture_demo(str(tmp_path / "f.pdf"))
+    with open(pdf, "rb") as fh:
+        files = [("fichiers", ("f.pdf", fh.read(), "application/pdf"))]
+    d = client.post("/api/extraire", files=files, data={"langue": "en"}).json()
+    wb = load_workbook(io.BytesIO(client.get("/telecharger/" + d["download_id"]).content))
+    assert wb.sheetnames == ["Summary", "Details"]
+    assert wb["Summary"]["A1"].value == "File"

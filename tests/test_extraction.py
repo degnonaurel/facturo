@@ -89,3 +89,51 @@ def test_ajout_a_feuille_existante_par_titres(tmp_path):
     assert ligne["Devise"] == "CAD" and ligne["Total TTC"] == 48.42
     assert "vision:test" not in [c.value for row in ws.iter_rows() for c in row]
     assert ws.max_row == 3                             # ligne existante intacte
+
+
+def _facture_test(nom="c.pdf", numero="42"):
+    d = {"fournisseur": "Pharmaprix", "numero": numero, "date": "2026-09-22",
+         "devise": "CAD", "total_ht": 43.36, "tps": 1.69, "tvq": 3.37,
+         "tva": 5.06, "total_ttc": 99.0,          # incohérent → une alerte
+         "lignes": [{"description": "x", "quantite": 1, "montant": 43.36}]}
+    return fve._vers_facture(nom, d, "vision:test")
+
+
+def test_excel_en_anglais(tmp_path):
+    from openpyxl import load_workbook
+    sortie = str(tmp_path / "en.xlsx")
+    fve.construire_excel([_facture_test()], sortie, langue="en")
+    wb = load_workbook(sortie)
+    assert wb.sheetnames == ["Summary", "Details"]
+    titres = [c.value for c in wb["Summary"][1]]
+    assert titres[:6] == ["File", "Vendor", "Invoice No.", "Date", "Currency", "Subtotal"]
+    assert "Warnings" in titres and "Moteur" not in titres
+    alerte = wb["Summary"].cell(2, titres.index("Warnings") + 1).value
+    assert alerte.startswith("Subtotal+tax") and "≠ total" in alerte
+    assert [c.value for c in wb["Details"][1]][3:] == [
+        "Description", "Quantity", "Unit price", "Amount"]
+
+
+def test_bascule_fr_en_fr(tmp_path):
+    """Un Excel français complété en anglais (puis l'inverse) : mêmes colonnes,
+    lignes à la suite, le classeur prend la langue du dernier ajout."""
+    from openpyxl import load_workbook
+    fr = str(tmp_path / "fr.xlsx")
+    en = str(tmp_path / "en.xlsx")
+    fr2 = str(tmp_path / "fr2.xlsx")
+    fve.construire_excel([_facture_test("a.pdf", "1")], fr, langue="fr")
+    fve.construire_excel([_facture_test("b.pdf", "2")], en, base_excel=fr, langue="en")
+
+    wb = load_workbook(en)
+    assert wb.sheetnames == ["Summary", "Details"]
+    ws = wb["Summary"]
+    titres = [c.value for c in ws[1]]
+    assert titres == [fve._EN[c] for c in fve._COLS_RESUME]   # aucune colonne en double
+    assert [r[2] for r in ws.iter_rows(min_row=2, values_only=True)] == ["1", "2"]
+    assert wb["Details"].max_row == 3
+
+    fve.construire_excel([_facture_test("c.pdf", "3")], fr2, base_excel=en, langue="fr")
+    wb = load_workbook(fr2)
+    assert wb.sheetnames == ["Resume", "Details"]
+    assert [c.value for c in wb["Resume"][1]] == fve._COLS_RESUME
+    assert wb["Resume"].max_row == 4

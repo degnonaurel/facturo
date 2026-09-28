@@ -34,7 +34,9 @@ pytest · Docker · déploiement continu sur Render.
   sans écraser : pour tenir sa compta au fil de l'eau.
 - **Contrôles de cohérence** (HT + taxes ≈ TTC, somme des lignes ≈ HT)
   signalés dans une colonne *Alertes*.
-- **Bilingue** — interface, pièces et messages en français et en anglais.
+- **Bilingue** — interface et pièces en français et en anglais ; l'Excel (noms
+  d'onglets, titres, alertes) suit la langue de travail, et un fichier existant
+  est reconnu dans l'une ou l'autre langue.
 
 ## Démarrage rapide
 

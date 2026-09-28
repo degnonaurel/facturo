@@ -34,7 +34,9 @@ continuous deployment on Render.
   is overwritten: keep your books up to date as you go.
 - **Consistency checks** (net + taxes ≈ total, sum of lines ≈ net) flagged in an
   *Alertes* column.
-- **Bilingual** — interface, documents and error messages in English and French.
+- **Bilingual** — interface and documents in English and French; the Excel file
+  (sheet names, column titles, warnings) follows the language you work in, and
+  an existing file is recognized in either language.
 
 ## Quick start
 

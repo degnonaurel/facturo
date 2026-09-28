@@ -621,55 +621,102 @@ def _largeurs(ws, maxi=60):
         ws.column_dimensions[get_column_letter(col[0].column)].width = min(maxi, lg + 2)
 
 
+# Les titres français servent de clés internes ; _EN donne leur version
+# anglaise. L'Excel est écrit dans la langue demandée (« fr » ou « en »).
 _COLS_RESUME = ["Fichier", "Fournisseur", "N°", "Date", "Devise", "Total HT",
                 "TPS", "TVQ", "Taxes", "Total TTC", "Nb lignes",
                 "Regroupé avec", "Alertes"]
 _COLS_DETAILS = ["Fichier", "Fournisseur", "N°", "Description", "Quantité",
                  "Prix unitaire", "Montant"]
+_EN = {
+    "Resume": "Summary", "Details": "Details",
+    "Fichier": "File", "Fournisseur": "Vendor", "N°": "Invoice No.",
+    "Date": "Date", "Devise": "Currency", "Total HT": "Subtotal",
+    "TPS": "GST", "TVQ": "QST", "Taxes": "Tax", "Total TTC": "Total",
+    "Nb lignes": "Items", "Regroupé avec": "Grouped with", "Alertes": "Warnings",
+    "Description": "Description", "Quantité": "Quantity",
+    "Prix unitaire": "Unit price", "Montant": "Amount",
+}
 
 # Autres titres acceptés pour une colonne, quand on ajoute à un classeur
 # existant (ancienne version de Facturo ou tableau d'un client).
 _SYNONYMES = {
+    "Resume": ["résumé"],
     "N°": ["n° facture", "no facture", "numéro", "numero", "invoice no",
-           "invoice #", "invoice number"],
-    "Total HT": ["ht", "sous-total", "subtotal", "net"],
-    "TPS": ["gst"],
-    "TVQ": ["qst"],
-    "Taxes": ["tva", "total taxes", "tax", "vat"],
-    "Total TTC": ["ttc", "total"],
-    "Nb lignes": ["lignes", "items"],
+           "invoice #", "invoice number", "no."],
+    "Total HT": ["ht", "sous-total", "net"],
+    "Taxes": ["tva", "total taxes", "vat", "total tax"],
+    "Total TTC": ["ttc", "montant total"],
+    "Nb lignes": ["lignes"],
+    "Alertes": ["alerts"],
 }
+
+
+def _titre(cle: str, langue: str) -> str:
+    return _EN[cle] if langue == "en" else cle
+
+
+def _noms_connus(cle: str) -> list[str]:
+    """Titres reconnus pour une clé, en minuscules : FR, EN, puis synonymes."""
+    return [cle.lower(), _EN[cle].lower()] + _SYNONYMES.get(cle, [])
 
 
 def _cle_titre(v) -> str:
     return str(v or "").strip().lower()
 
 
-def _obtenir_feuille(wb, nom: str, cols: list[str]):
+_TRADUCTIONS_ALERTES = [
+    (r"TPS\+TVQ \((.+?)\) ≠ TVA totale \((.+?)\)", r"GST+QST (\1) ≠ total tax (\2)"),
+    (r"HT\+TVA \((.+?)\) ≠ TTC \((.+?)\)", r"Subtotal+tax (\1) ≠ total (\2)"),
+    (r"Somme des lignes \((.+?)\) ≠ HT \((.+?)\)", r"Sum of lines (\1) ≠ subtotal (\2)"),
+    (r"PDF scanné \(aucun texte\) : illisible en mode 'tables'\.",
+     "Scanned PDF (no text): unreadable in 'tables' mode."),
+    (r"Repli sur 'tables' \(LLM indisponible\)\.",
+     "Fell back to 'tables' mode (AI service unavailable)."),
+]
+
+
+def traduire_alerte(texte: str, langue: str) -> str:
+    """Traduit une alerte (générée en français) dans la langue demandée."""
+    if langue != "en":
+        return texte
+    for motif, remplacement in _TRADUCTIONS_ALERTES:
+        texte = re.sub(motif, remplacement, texte)
+    return texte
+
+
+def _obtenir_feuille(wb, cle: str, cols: list[str], langue: str):
     """
-    Récupère (ou crée) une feuille et renvoie (feuille, n° de colonne de
-    chaque titre de `cols`). Dans une feuille existante, les colonnes sont
-    retrouvées par leur titre ; les titres manquants sont ajoutés à droite.
+    Récupère (ou crée) la feuille `cle` et renvoie (feuille, n° de colonne de
+    chaque clé de `cols`). Une feuille existante est reconnue en français comme
+    en anglais, puis passe dans la langue demandée : son nom et les titres
+    standard de Facturo sont traduits, les titres personnalisés sont conservés.
+    Colonnes retrouvées par leur titre ; titres manquants ajoutés à droite.
     """
-    if nom not in wb.sheetnames:
-        ws = wb.create_sheet(nom)
-        ws.append(cols)
+    noms = _noms_connus(cle)
+    ws = next((wb[n] for n in wb.sheetnames if n.strip().lower() in noms), None)
+    if ws is None:
+        ws = wb.create_sheet(_titre(cle, langue))
+        ws.append([_titre(c, langue) for c in cols])
         _entete(ws, len(cols))
         return ws, {c: i + 1 for i, c in enumerate(cols)}
+    if _titre(cle, langue) not in wb.sheetnames:
+        ws.title = _titre(cle, langue)
 
-    ws = wb[nom]
     existants = {_cle_titre(c.value): c.column for c in ws[1] if c.value is not None}
     derniere = max(existants.values(), default=0)
     positions = {}
-    for titre in cols:
-        for cle in [titre.lower()] + _SYNONYMES.get(titre, []):
-            if cle in existants and existants[cle] not in positions.values():
-                positions[titre] = existants[cle]
+    for c in cols:
+        for nom in _noms_connus(c):
+            if nom in existants and existants[nom] not in positions.values():
+                positions[c] = existants[nom]
+                if nom in (c.lower(), _EN[c].lower()):     # titre standard
+                    ws.cell(row=1, column=positions[c], value=_titre(c, langue))
                 break
         else:
             derniere += 1
-            ws.cell(row=1, column=derniere, value=titre)
-            positions[titre] = derniere
+            ws.cell(row=1, column=derniere, value=_titre(c, langue))
+            positions[c] = derniere
     _entete(ws, derniere)
     return ws, positions
 
@@ -677,47 +724,49 @@ def _obtenir_feuille(wb, nom: str, cols: list[str]):
 def _ajouter_ligne(ws, positions: dict, valeurs: dict) -> int:
     """Écrit une ligne sous la dernière ligne remplie ; renvoie son numéro."""
     r = ws.max_row + 1
-    for titre, v in valeurs.items():
-        ws.cell(row=r, column=positions[titre], value=v)
+    for cle, v in valeurs.items():
+        ws.cell(row=r, column=positions[cle], value=v)
     return r
 
 
 def construire_excel(factures: list[Facture], chemin_sortie: str,
-                     base_excel: Optional[str] = None) -> str:
+                     base_excel: Optional[str] = None, langue: str = "fr") -> str:
     """
-    Écrit les factures dans un classeur Excel.
-    Si `base_excel` pointe vers un classeur existant, les nouvelles lignes y
-    sont AJOUTÉES à la suite (feuilles Resume et Details), sans écraser
-    l'existant. Sinon un nouveau classeur est créé.
+    Écrit les factures dans un classeur Excel, titres dans `langue` (« fr »
+    ou « en »). Si `base_excel` pointe vers un classeur existant, les nouvelles
+    lignes y sont AJOUTÉES à la suite (feuilles Resume/Summary et Details),
+    sans écraser l'existant ; le classeur prend la langue de cet ajout.
+    Sinon un nouveau classeur est créé.
     """
     if base_excel and os.path.isfile(base_excel):
         from openpyxl import load_workbook
         wb = load_workbook(base_excel)
     else:
         wb = Workbook()
-    noms_avant = set(wb.sheetnames)
-    ws, pos_r = _obtenir_feuille(wb, "Resume", _COLS_RESUME)
-    wd, pos_d = _obtenir_feuille(wb, "Details", _COLS_DETAILS)
+    avant = list(wb.worksheets)
+    ws, pos_r = _obtenir_feuille(wb, "Resume", _COLS_RESUME, langue)
+    wd, pos_d = _obtenir_feuille(wb, "Details", _COLS_DETAILS, langue)
     # Supprime la feuille par défaut vide d'un classeur neuf ("Sheet").
-    for nom in list(wb.sheetnames):
-        if nom in noms_avant and nom not in ("Resume", "Details"):
-            f = wb[nom]
-            if f.max_row <= 1 and (f.max_column <= 1 and f.cell(1, 1).value is None):
-                del wb[nom]
+    for f in avant:
+        if f is not ws and f is not wd and f.max_row <= 1 \
+                and f.max_column <= 1 and f.cell(1, 1).value is None:
+            wb.remove(f)
 
+    lies = "n° liés" if langue != "en" else "linked no."
     for f in factures:
         regroupe = " ; ".join(f.pieces_liees)
         if f.numeros_lies:
-            regroupe += f"  (n° liés : {', '.join(f.numeros_lies)})"
+            regroupe += f"  ({lies} : {', '.join(f.numeros_lies)})"
+        alertes = [traduire_alerte(a, langue) for a in f.alertes]
         r = _ajouter_ligne(ws, pos_r, {
             "Fichier": f.fichier, "Fournisseur": f.fournisseur, "N°": f.numero,
             "Date": f.date, "Devise": f.devise, "Total HT": f.total_ht,
             "TPS": f.tps, "TVQ": f.tvq, "Taxes": f.tva, "Total TTC": f.total_ttc,
             "Nb lignes": len(f.lignes), "Regroupé avec": regroupe,
-            "Alertes": " | ".join(f.alertes)})
-        for titre in ("Total HT", "TPS", "TVQ", "Taxes", "Total TTC"):
-            ws.cell(row=r, column=pos_r[titre]).number_format = _MON
-        if f.alertes:
+            "Alertes": " | ".join(alertes)})
+        for cle in ("Total HT", "TPS", "TVQ", "Taxes", "Total TTC"):
+            ws.cell(row=r, column=pos_r[cle]).number_format = _MON
+        if alertes:
             ws.cell(row=r, column=pos_r["Alertes"]).fill = _ALERTE
     _largeurs(ws)
 
@@ -728,8 +777,8 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
                 "N°": f.numero, "Description": l.description,
                 "Quantité": l.quantite, "Prix unitaire": l.prix_unitaire,
                 "Montant": l.montant})
-            for titre in ("Prix unitaire", "Montant"):
-                wd.cell(row=r, column=pos_d[titre]).number_format = _MON
+            for cle in ("Prix unitaire", "Montant"):
+                wd.cell(row=r, column=pos_d[cle]).number_format = _MON
     _largeurs(wd)
 
     wb.save(chemin_sortie)
@@ -753,6 +802,8 @@ def _parseur():
     p.add_argument("--modele", default=None)
     p.add_argument("--pas-de-regroupement", action="store_true",
                    help="Désactive le regroupement des pièces d'un même achat.")
+    p.add_argument("--langue", choices=["fr", "en"], default="fr",
+                   help="Langue des titres de l'Excel (fr ou en).")
     p.add_argument("--json", action="store_true")
     return p
 
@@ -789,7 +840,8 @@ def main(argv=None):
         print(f"  ⓘ {avant - len(factures)} pièce(s) regroupée(s) (même achat).",
               file=sys.stderr)
     base = getattr(args, "ajouter_a", None)
-    chemin = construire_excel(factures, args.sortie, base_excel=base)
+    chemin = construire_excel(factures, args.sortie, base_excel=base,
+                              langue=args.langue)
     suffixe = f" (ajoutées à {os.path.basename(base)})" if base else ""
     print(f"\n✓ {len(factures)} facture(s) -> {chemin}{suffixe}", file=sys.stderr)
     return 0
