@@ -6,7 +6,7 @@
 <sub>Free hosting: the first load may take up to a minute. Demo limited to 10 files per day per visitor.</sub>
 
 Facturo reads **invoices and receipts** (photos or PDFs, in English or French)
-and exports them to a **clean Excel workbook** with two sheets: `Resume`
+and exports them to a **clean Excel workbook** with two sheets: `Summary`
 (one row per document) and `Details` (line items). Drag-and-drop web app with
 a one-click **EN/FR** language switch, plus a command-line tool.
 
@@ -33,7 +33,7 @@ continuous deployment on Render.
 - **Append to an existing Excel file** — new rows are added at the end, nothing
   is overwritten: keep your books up to date as you go.
 - **Consistency checks** (net + taxes ≈ total, sum of lines ≈ net) flagged in an
-  *Alertes* column.
+  *Warnings* column (*Alertes* in French).
 - **Bilingual** — interface and documents in English and French; the Excel file
   (sheet names, column titles, warnings) follows the language you work in, and
   an existing file is recognized in either language.
