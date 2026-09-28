@@ -622,20 +622,64 @@ def _largeurs(ws, maxi=60):
 
 
 _COLS_RESUME = ["Fichier", "Fournisseur", "N°", "Date", "Devise", "Total HT",
-                "TPS", "TVQ", "Taxes", "Total TTC", "Nb lignes", "Moteur",
+                "TPS", "TVQ", "Taxes", "Total TTC", "Nb lignes",
                 "Regroupé avec", "Alertes"]
 _COLS_DETAILS = ["Fichier", "Fournisseur", "N°", "Description", "Quantité",
                  "Prix unitaire", "Montant"]
 
+# Autres titres acceptés pour une colonne, quand on ajoute à un classeur
+# existant (ancienne version de Facturo ou tableau d'un client).
+_SYNONYMES = {
+    "N°": ["n° facture", "no facture", "numéro", "numero", "invoice no",
+           "invoice #", "invoice number"],
+    "Total HT": ["ht", "sous-total", "subtotal", "net"],
+    "TPS": ["gst"],
+    "TVQ": ["qst"],
+    "Taxes": ["tva", "total taxes", "tax", "vat"],
+    "Total TTC": ["ttc", "total"],
+    "Nb lignes": ["lignes", "items"],
+}
+
+
+def _cle_titre(v) -> str:
+    return str(v or "").strip().lower()
+
 
 def _obtenir_feuille(wb, nom: str, cols: list[str]):
-    """Récupère une feuille existante, ou la crée avec ses entêtes."""
-    if nom in wb.sheetnames:
-        return wb[nom]
-    ws = wb.create_sheet(nom)
-    ws.append(cols)
-    _entete(ws, len(cols))
-    return ws
+    """
+    Récupère (ou crée) une feuille et renvoie (feuille, n° de colonne de
+    chaque titre de `cols`). Dans une feuille existante, les colonnes sont
+    retrouvées par leur titre ; les titres manquants sont ajoutés à droite.
+    """
+    if nom not in wb.sheetnames:
+        ws = wb.create_sheet(nom)
+        ws.append(cols)
+        _entete(ws, len(cols))
+        return ws, {c: i + 1 for i, c in enumerate(cols)}
+
+    ws = wb[nom]
+    existants = {_cle_titre(c.value): c.column for c in ws[1] if c.value is not None}
+    derniere = max(existants.values(), default=0)
+    positions = {}
+    for titre in cols:
+        for cle in [titre.lower()] + _SYNONYMES.get(titre, []):
+            if cle in existants and existants[cle] not in positions.values():
+                positions[titre] = existants[cle]
+                break
+        else:
+            derniere += 1
+            ws.cell(row=1, column=derniere, value=titre)
+            positions[titre] = derniere
+    _entete(ws, derniere)
+    return ws, positions
+
+
+def _ajouter_ligne(ws, positions: dict, valeurs: dict) -> int:
+    """Écrit une ligne sous la dernière ligne remplie ; renvoie son numéro."""
+    r = ws.max_row + 1
+    for titre, v in valeurs.items():
+        ws.cell(row=r, column=positions[titre], value=v)
+    return r
 
 
 def construire_excel(factures: list[Facture], chemin_sortie: str,
@@ -652,8 +696,8 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
     else:
         wb = Workbook()
     noms_avant = set(wb.sheetnames)
-    ws = _obtenir_feuille(wb, "Resume", _COLS_RESUME)
-    wd = _obtenir_feuille(wb, "Details", _COLS_DETAILS)
+    ws, pos_r = _obtenir_feuille(wb, "Resume", _COLS_RESUME)
+    wd, pos_d = _obtenir_feuille(wb, "Details", _COLS_DETAILS)
     # Supprime la feuille par défaut vide d'un classeur neuf ("Sheet").
     for nom in list(wb.sheetnames):
         if nom in noms_avant and nom not in ("Resume", "Details"):
@@ -661,30 +705,31 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
             if f.max_row <= 1 and (f.max_column <= 1 and f.cell(1, 1).value is None):
                 del wb[nom]
 
-    debut_r = ws.max_row + 1
     for f in factures:
         regroupe = " ; ".join(f.pieces_liees)
         if f.numeros_lies:
             regroupe += f"  (n° liés : {', '.join(f.numeros_lies)})"
-        ws.append([f.fichier, f.fournisseur, f.numero, f.date, f.devise,
-                   f.total_ht, f.tps, f.tvq, f.tva, f.total_ttc,
-                   len(f.lignes), f.moteur, regroupe, " | ".join(f.alertes)])
-    for i, f in enumerate(factures):
-        r = debut_r + i
-        for c in (6, 7, 8, 9, 10):
-            ws.cell(row=r, column=c).number_format = _MON
+        r = _ajouter_ligne(ws, pos_r, {
+            "Fichier": f.fichier, "Fournisseur": f.fournisseur, "N°": f.numero,
+            "Date": f.date, "Devise": f.devise, "Total HT": f.total_ht,
+            "TPS": f.tps, "TVQ": f.tvq, "Taxes": f.tva, "Total TTC": f.total_ttc,
+            "Nb lignes": len(f.lignes), "Regroupé avec": regroupe,
+            "Alertes": " | ".join(f.alertes)})
+        for titre in ("Total HT", "TPS", "TVQ", "Taxes", "Total TTC"):
+            ws.cell(row=r, column=pos_r[titre]).number_format = _MON
         if f.alertes:
-            ws.cell(row=r, column=14).fill = _ALERTE
+            ws.cell(row=r, column=pos_r["Alertes"]).fill = _ALERTE
     _largeurs(ws)
 
-    debut_d = wd.max_row + 1
     for f in factures:
         for l in f.lignes:
-            wd.append([f.fichier, f.fournisseur, f.numero, l.description,
-                       l.quantite, l.prix_unitaire, l.montant])
-    for r in range(debut_d, wd.max_row + 1):
-        for c in (6, 7):
-            wd.cell(row=r, column=c).number_format = _MON
+            r = _ajouter_ligne(wd, pos_d, {
+                "Fichier": f.fichier, "Fournisseur": f.fournisseur,
+                "N°": f.numero, "Description": l.description,
+                "Quantité": l.quantite, "Prix unitaire": l.prix_unitaire,
+                "Montant": l.montant})
+            for titre in ("Prix unitaire", "Montant"):
+                wd.cell(row=r, column=pos_d[titre]).number_format = _MON
     _largeurs(wd)
 
     wb.save(chemin_sortie)

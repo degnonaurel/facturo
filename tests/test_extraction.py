@@ -56,3 +56,36 @@ def test_ajout_a_excel_existant(tmp_path):
     noms = [wb["Resume"].cell(i, 2).value for i in range(2, wb["Resume"].max_row + 1)]
     assert noms == ["Alpha", "Beta"]
     assert wb["Details"].max_row - 1 == 3  # 2 + 1 lignes de détail
+
+
+def test_ajout_a_feuille_existante_par_titres(tmp_path):
+    """Ajout à un onglet Resume aux titres différents : colonnes alignées par
+    titre, titres manquants ajoutés, jamais de colonne « Moteur »."""
+    from openpyxl import Workbook, load_workbook
+    base = str(tmp_path / "ancien.xlsx")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Resume"
+    ws.append(["Fichier", "Fournisseur", "N° facture", "Date", "Total HT", "TVA", "››"])
+    ws.append(["a.pdf", "Ancien", "INV-1", "2026-09-15", 100.0, 13.0, 113.0])
+    wb.save(base)
+
+    d = {"fournisseur": "Pharmaprix", "numero": "104701", "date": "2026-09-22",
+         "devise": "CAD", "total_ht": 43.36, "tps": 1.69, "tvq": 3.37,
+         "tva": 5.06, "total_ttc": 48.42,
+         "lignes": [{"description": "x", "montant": 43.36}]}
+    sortie = str(tmp_path / "sortie.xlsx")
+    fve.construire_excel([fve._vers_facture("b.heic", d, "vision:test")],
+                         sortie, base_excel=base)
+
+    ws = load_workbook(sortie)["Resume"]
+    titres = [c.value for c in ws[1]]
+    assert "Moteur" not in titres
+    assert all(t for t in titres)                      # aucun titre vide
+    ligne = {titres[i]: c.value for i, c in enumerate(ws[3])}
+    assert ligne["N° facture"] == "104701"             # retrouvé par synonyme
+    assert ligne["Total HT"] == 43.36
+    assert ligne["TVA"] == 5.06                        # « Taxes » = « TVA »
+    assert ligne["Devise"] == "CAD" and ligne["Total TTC"] == 48.42
+    assert "vision:test" not in [c.value for row in ws.iter_rows() for c in row]
+    assert ws.max_row == 3                             # ligne existante intacte
