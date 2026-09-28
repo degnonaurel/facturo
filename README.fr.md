@@ -32,6 +32,9 @@ pytest · Docker · déploiement continu sur Render.
 - **Regroupement** des pièces d'un même achat (reçu détaillé + relevé de paiement).
 - **Ajout à un Excel existant** — les nouvelles lignes s'ajoutent à la fin,
   sans écraser : pour tenir sa compta au fil de l'eau.
+- **Totaux cumulés** — une ligne TOTAL par devise en bas du résumé (nombre de
+  factures, HT, TPS, TVQ, taxes, TTC), recalculée à chaque ajout ; l'app web
+  affiche aussi le total cumulé du fichier.
 - **Contrôles de cohérence** (HT + taxes ≈ TTC, somme des lignes ≈ HT)
   signalés dans une colonne *Alertes*.
 - **Bilingue** — interface et pièces en français et en anglais ; l'Excel (noms

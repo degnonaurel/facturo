@@ -32,6 +32,9 @@ continuous deployment on Render.
 - **Grouping** of documents from the same purchase (itemized receipt + payment slip).
 - **Append to an existing Excel file** — new rows are added at the end, nothing
   is overwritten: keep your books up to date as you go.
+- **Running totals** — a TOTAL row per currency at the bottom of the summary
+  (invoice count, subtotal, GST, QST, tax, total), recalculated on every append;
+  the web app also shows the cumulative file total.
 - **Consistency checks** (net + taxes ≈ total, sum of lines ≈ net) flagged in an
   *Warnings* column (*Alertes* in French).
 - **Bilingual** — interface and documents in English and French; the Excel file

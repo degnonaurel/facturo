@@ -130,6 +130,10 @@ async def extraire(request: Request,
                                         f"Excel existant illisible, nouveau fichier créé ({e})")})
             fve.construire_excel(factures, chemin, langue=langue)
         _TELECHARGEMENTS[jeton] = chemin
+        try:
+            totaux = fve.totaux_resume(chemin)
+        except Exception:
+            totaux = []
 
     resume = [{
         "fichier": f.fichier, "fournisseur": f.fournisseur, "numero": f.numero,
@@ -139,7 +143,7 @@ async def extraire(request: Request,
         "alertes": [fve.traduire_alerte(a, langue) for a in f.alertes],
     } for f in factures]
     return {"factures": resume, "erreurs": erreurs, "download_id": jeton,
-            "ajoute": bool(base_path)}
+            "ajoute": bool(base_path), "totaux_fichier": totaux}
 
 
 @app.get("/telecharger/{jeton}")
@@ -266,6 +270,8 @@ _PAGE = r"""<!DOCTYPE html>
   tbody tr:hover{background:color-mix(in srgb,var(--pri) 4%,transparent)}
   .lie{color:var(--muted);font-size:.78rem;display:block;margin-top:2px}
   .al{color:var(--alerte);font-size:.78rem;display:block;margin-top:2px}
+  .cumul{margin-top:14px;padding:12px 14px;border-radius:12px;font-size:.92rem;line-height:1.7;
+    background:color-mix(in srgb,var(--pri) 8%,var(--card));border:1px solid var(--bord)}
   .err{color:var(--alerte);margin-top:14px;font-size:.9rem}
   .pied{max-width:960px;margin:0 auto;padding:8px 18px 40px;color:var(--muted);font-size:.8rem;text-align:center}
   .masque{display:none}
@@ -342,6 +348,7 @@ _PAGE = r"""<!DOCTYPE html>
           <a id="tel" class="tel" href="#"><span>⬇</span><span data-i18n="tel">Télécharger l'Excel</span></a>
         </div>
         <div style="overflow-x:auto"><table id="tab"></table></div>
+        <div id="cumul" class="cumul masque"></div>
       </div>
     </div>
   </div>
@@ -362,7 +369,8 @@ const I18N = {
     res:"Résultat", tel:"Télécharger l'Excel", pied:"Facturo — vos données ne servent qu'à produire votre tableur.",
     th_f:"Fournisseur", th_n:"N°", th_d:"Date", th_ht:"HT", th_tps:"TPS", th_tvq:"TVQ", th_tx:"Taxes", th_ttc:"TTC", th_l:"Lignes",
     regroupe:"regroupé avec", pieces:"pièce(s)", aucune:"Aucune donnée n'a pu être extraite.", reseau:"Erreur réseau : ",
-    quota:"Limite de la démo atteinte pour aujourd'hui. Revenez demain !" },
+    quota:"Limite de la démo atteinte pour aujourd'hui. Revenez demain !",
+    cumul:"Total du fichier", dont_taxes:"dont taxes", nb_fact:"facture(s) depuis le début" },
   en:{ statut_check:"Checking…", statut_on:"Service online", statut_off:"Service unavailable",
     hero1:"Your invoices and receipts,", hero2:"in Excel — from a photo.",
     sous:"Drop a photo or a PDF. You get a clean spreadsheet, ready for bookkeeping — in seconds.",
@@ -375,7 +383,8 @@ const I18N = {
     res:"Result", tel:"Download the Excel", pied:"Facturo — your data is only used to produce your spreadsheet.",
     th_f:"Vendor", th_n:"No.", th_d:"Date", th_ht:"Net", th_tps:"GST", th_tvq:"QST", th_tx:"Tax", th_ttc:"Total", th_l:"Items",
     regroupe:"merged with", pieces:"item(s)", aucune:"No data could be extracted.", reseau:"Network error: ",
-    quota:"Today's demo limit has been reached. Please come back tomorrow!" }
+    quota:"Today's demo limit has been reached. Please come back tomorrow!",
+    cumul:"File total", dont_taxes:"incl. tax", nb_fact:"invoice(s) since the start" }
 };
 let LANG = localStorage.getItem('facturo_lang') || (navigator.language||'fr').slice(0,2);
 if(LANG!=='en') LANG='fr';
@@ -470,6 +479,9 @@ function afficher(d){
   tab.innerHTML=h+'</tbody>';
   document.getElementById('titreRes').textContent=`${T('res')} — ${d.factures.length} ${T('pieces')}`;
   document.getElementById('ajouteNote').textContent=d.ajoute?('↳ '+T('ajoute_note')):'';
+  const cumul=document.getElementById('cumul'), tot=d.totaux_fichier||[];
+  cumul.innerHTML=tot.map(t=>`Σ ${T('cumul')} : <b>${fmt(t.total_ttc)} ${t.devise}</b> · ${T('dont_taxes')} ${fmt(t.taxes)} ${t.devise} · ${t.nb} ${T('nb_fact')}`).join('<br>');
+  cumul.classList.toggle('masque',!tot.length);
   if(d.download_id)tel.href='/telecharger/'+d.download_id;
   res.classList.remove('masque'); res.scrollIntoView({behavior:'smooth',block:'nearest'});
 }

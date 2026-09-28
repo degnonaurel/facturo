@@ -3,6 +3,7 @@
 from _helpers import RACINE, pdf_facture_demo  # noqa: F401  (ajuste sys.path)
 import facture_vers_excel as fve
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 
 def _fac(nom, four, ttc, n_lignes, date="2026-09-01"):
@@ -53,7 +54,8 @@ def test_ajout_a_excel_existant(tmp_path):
     fve.construire_excel([_fac("b.jpg", "Beta", 20, 1)], base, base_excel=base)
     wb = load_workbook(base)
     assert wb.sheetnames == ["Resume", "Details"]
-    noms = [wb["Resume"].cell(i, 2).value for i in range(2, wb["Resume"].max_row + 1)]
+    noms = [wb["Resume"].cell(i, 2).value for i in range(2, wb["Resume"].max_row + 1)
+            if not fve._est_ligne_total(wb["Resume"].cell(i, 1).value)]
     assert noms == ["Alpha", "Beta"]
     assert wb["Details"].max_row - 1 == 3  # 2 + 1 lignes de détail
 
@@ -88,7 +90,8 @@ def test_ajout_a_feuille_existante_par_titres(tmp_path):
     assert ligne["TVA"] == 5.06                        # « Taxes » = « TVA »
     assert ligne["Devise"] == "CAD" and ligne["Total TTC"] == 48.42
     assert "vision:test" not in [c.value for row in ws.iter_rows() for c in row]
-    assert ws.max_row == 3                             # ligne existante intacte
+    assert ws.cell(2, 2).value == "Ancien"             # ligne existante intacte
+    assert ws.cell(4, 1).value.startswith("TOTAL")     # totaux en bas
 
 
 def _facture_test(nom="c.pdf", numero="42"):
@@ -129,11 +132,35 @@ def test_bascule_fr_en_fr(tmp_path):
     ws = wb["Summary"]
     titres = [c.value for c in ws[1]]
     assert titres == [fve._EN[c] for c in fve._COLS_RESUME]   # aucune colonne en double
-    assert [r[2] for r in ws.iter_rows(min_row=2, values_only=True)] == ["1", "2"]
+    assert [r[2] for r in ws.iter_rows(min_row=2, values_only=True)
+            if not fve._est_ligne_total(r[0])] == ["1", "2"]
     assert wb["Details"].max_row == 3
 
     fve.construire_excel([_facture_test("c.pdf", "3")], fr2, base_excel=en, langue="fr")
     wb = load_workbook(fr2)
     assert wb.sheetnames == ["Resume", "Details"]
     assert [c.value for c in wb["Resume"][1]] == fve._COLS_RESUME
-    assert wb["Resume"].max_row == 4
+    assert wb["Resume"].max_row == 5                  # 3 pièces + 1 TOTAL
+
+
+def test_totaux_cumules_mis_a_jour(tmp_path):
+    """Une ligne TOTAL par devise, recalculée en bas à chaque ajout."""
+    base = str(tmp_path / "compta.xlsx")
+    fve.construire_excel([_facture_test("a.pdf", "1")], base)
+    fve.construire_excel([_facture_test("b.pdf", "2")], base, base_excel=base)
+    usd = _facture_test("c.pdf", "3")
+    usd.devise = "USD"
+    fve.construire_excel([usd], base, base_excel=base, langue="en")
+
+    ws = load_workbook(base)["Summary"]
+    col = [c.value for c in ws[1]]
+    fichiers = [ws.cell(r, 1).value for r in range(2, ws.max_row + 1)]
+    assert fichiers == ["a.pdf", "b.pdf", "c.pdf", "TOTAL CAD", "TOTAL USD"]
+    ttc = get_column_letter(col.index("Total") + 1)
+    dev = get_column_letter(col.index("Currency") + 1)
+    assert ws[f"{ttc}5"].value == f'=SUMIF(${dev}$2:${dev}$4,"CAD",${ttc}$2:${ttc}$4)'
+    assert "invoice(s)" in ws.cell(5, 2).value
+
+    totaux = {t["devise"]: t for t in fve.totaux_resume(base)}
+    assert totaux["CAD"]["nb"] == 2 and totaux["CAD"]["total_ttc"] == 198.0
+    assert totaux["CAD"]["taxes"] == 10.12 and totaux["USD"]["nb"] == 1

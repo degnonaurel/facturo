@@ -602,6 +602,7 @@ def traiter_facture(chemin, moteur="auto", fournisseur_llm="auto", modele=None):
 _ENTETE = Font(bold=True, color="FFFFFF", size=11)
 _FOND = PatternFill("solid", fgColor="2F5496")
 _ALERTE = PatternFill("solid", fgColor="FCE4D6")
+_FOND_TOTAL = PatternFill("solid", fgColor="DDEBF7")
 _BORD = Border(*(Side(style="thin", color="D9D9D9"),) * 4)
 _MON = '#,##0.00'
 
@@ -617,7 +618,9 @@ def _entete(ws, n):
 
 def _largeurs(ws, maxi=60):
     for col in ws.columns:
-        lg = max((len(str(c.value)) for c in col if c.value is not None), default=10)
+        lg = max((len(str(c.value)) for c in col
+                  if c.value is not None and not str(c.value).startswith("=")),
+                 default=10)
         ws.column_dimensions[get_column_letter(col[0].column)].width = min(maxi, lg + 2)
 
 
@@ -729,6 +732,92 @@ def _ajouter_ligne(ws, positions: dict, valeurs: dict) -> int:
     return r
 
 
+_COLS_MONTANTS = ("Total HT", "TPS", "TVQ", "Taxes", "Total TTC")
+_MOTIF_TOTAL = re.compile(r"^TOTAL(\s+\S{1,5})?$")
+
+
+def _est_ligne_total(v) -> bool:
+    return isinstance(v, str) and bool(_MOTIF_TOTAL.match(v.strip()))
+
+
+def _retirer_totaux(ws, positions: dict) -> None:
+    """Retire les lignes TOTAL (elles seront recalculées sous les nouvelles)."""
+    for r in range(ws.max_row, 1, -1):
+        if _est_ligne_total(ws.cell(row=r, column=positions["Fichier"]).value):
+            ws.delete_rows(r)
+
+
+def _ajouter_totaux(ws, positions: dict, langue: str) -> None:
+    """
+    Ajoute en bas du Resume une ligne TOTAL par devise : nombre de pièces et
+    sommes HT / TPS / TVQ / taxes / TTC, en formules Excel (elles restent
+    justes si l'utilisateur corrige une valeur à la main).
+    """
+    fin = ws.max_row
+    if fin < 2:
+        return
+
+    def plage(cle):
+        c = get_column_letter(positions[cle])
+        return f"${c}$2:${c}${fin}"
+
+    devises = []
+    for r in range(2, fin + 1):
+        v = ws.cell(row=r, column=positions["Devise"]).value
+        d = str(v).strip().upper() if v else ""
+        if d not in devises:
+            devises.append(d)
+    mot = "invoice(s)" if langue == "en" else "facture(s)"
+    for d in devises:
+        r = ws.max_row + 1
+        critere = f'"{d}"'
+        ws.cell(row=r, column=positions["Fichier"], value=f"TOTAL {d}".strip())
+        ws.cell(row=r, column=positions["Fournisseur"],
+                value=f'=COUNTIF({plage("Devise")},{critere})&" {mot}"')
+        ws.cell(row=r, column=positions["Devise"], value=d or None)
+        for cle in _COLS_MONTANTS:
+            ws.cell(row=r, column=positions[cle],
+                    value=f'=SUMIF({plage("Devise")},{critere},{plage(cle)})'
+                    ).number_format = _MON
+        for cell in ws[r]:
+            cell.font, cell.fill, cell.border = Font(bold=True), _FOND_TOTAL, _BORD
+
+
+def totaux_resume(chemin: str) -> list[dict]:
+    """
+    Cumul de toutes les pièces du classeur (hors lignes TOTAL), par devise :
+    [{devise, nb, total_ht, taxes, total_ttc}]. Sert à l'affichage web.
+    """
+    from openpyxl import load_workbook
+    wb = load_workbook(chemin)
+    ws = next((wb[n] for n in wb.sheetnames
+               if n.strip().lower() in _noms_connus("Resume")), None)
+    if ws is None:
+        return []
+    col = {}
+    for c in ws[1]:
+        for cle in ("Fichier", "Devise", "Total HT", "Taxes", "Total TTC"):
+            if cle not in col and _cle_titre(c.value) in _noms_connus(cle):
+                col[cle] = c.column - 1
+    if "Fichier" not in col:
+        return []
+    groupes: dict[str, dict] = {}
+    for ligne in ws.iter_rows(min_row=2, values_only=True):
+        if not any(v is not None for v in ligne) or _est_ligne_total(ligne[col["Fichier"]]):
+            continue
+        d = ligne[col["Devise"]] if "Devise" in col else None
+        d = str(d).strip().upper() if d else ""
+        g = groupes.setdefault(d, {"devise": d, "nb": 0, "total_ht": 0.0,
+                                   "taxes": 0.0, "total_ttc": 0.0})
+        g["nb"] += 1
+        for cle, champ in (("Total HT", "total_ht"), ("Taxes", "taxes"),
+                           ("Total TTC", "total_ttc")):
+            v = ligne[col[cle]] if cle in col else None
+            if isinstance(v, (int, float)):
+                g[champ] = round(g[champ] + v, 2)
+    return list(groupes.values())
+
+
 def construire_excel(factures: list[Facture], chemin_sortie: str,
                      base_excel: Optional[str] = None, langue: str = "fr") -> str:
     """
@@ -752,6 +841,7 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
                 and f.max_column <= 1 and f.cell(1, 1).value is None:
             wb.remove(f)
 
+    _retirer_totaux(ws, pos_r)
     lies = "n° liés" if langue != "en" else "linked no."
     for f in factures:
         regroupe = " ; ".join(f.pieces_liees)
@@ -768,6 +858,7 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
             ws.cell(row=r, column=pos_r[cle]).number_format = _MON
         if alertes:
             ws.cell(row=r, column=pos_r["Alertes"]).fill = _ALERTE
+    _ajouter_totaux(ws, pos_r, langue)
     _largeurs(ws)
 
     for f in factures:
@@ -781,6 +872,7 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
                 wd.cell(row=r, column=pos_d[cle]).number_format = _MON
     _largeurs(wd)
 
+    wb.calculation.fullCalcOnLoad = True    # totaux recalculés à l'ouverture
     wb.save(chemin_sortie)
     return chemin_sortie
 

@@ -49,7 +49,9 @@ def test_ajout_a_base_via_web(tmp_path):
     assert d["ajoute"] is True
     xl = client.get("/telecharger/" + d["download_id"]).content
     wb = load_workbook(io.BytesIO(xl))
-    assert wb["Resume"].max_row - 1 == 2  # 1 existante + 1 nouvelle
+    pieces = [r for r in wb["Resume"].iter_rows(min_row=2, values_only=True)
+              if not fve._est_ligne_total(r[0])]
+    assert len(pieces) == 2  # 1 existante + 1 nouvelle (+ lignes TOTAL)
 
 
 def test_quota_de_demo(tmp_path, monkeypatch):
@@ -80,3 +82,11 @@ def test_langue_anglaise_via_web(tmp_path):
     wb = load_workbook(io.BytesIO(client.get("/telecharger/" + d["download_id"]).content))
     assert wb.sheetnames == ["Summary", "Details"]
     assert wb["Summary"]["A1"].value == "File"
+
+
+def test_totaux_fichier_renvoyes(tmp_path):
+    pdf = pdf_facture_demo(str(tmp_path / "f.pdf"))
+    with open(pdf, "rb") as fh:
+        files = [("fichiers", ("f.pdf", fh.read(), "application/pdf"))]
+    d = client.post("/api/extraire", files=files).json()
+    assert d["totaux_fichier"] and d["totaux_fichier"][0]["nb"] == 1
