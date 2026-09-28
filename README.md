@@ -1,69 +1,74 @@
-# Facturo — de la photo au tableur
+# Facturo — from photo to spreadsheet
 
-**▶ Démo en ligne : [facturo-ow5a.onrender.com](https://facturo-ow5a.onrender.com)**
-<sub>Hébergement gratuit : le premier chargement peut prendre jusqu'à une minute.
-Démo limitée à 10 fichiers par jour et par visiteur.</sub>
+**English** · [Français](README.fr.md)
 
-Facturo lit vos **factures et reçus** (photos ou PDF, FR/EN) et les exporte
-dans un **Excel propre** à deux feuilles : `Resume` (une ligne par pièce) et
-`Details` (les lignes de facture). Interface web glisser-déposer bilingue,
-plus un outil en ligne de commande.
+**▶ Live demo: [facturo-ow5a.onrender.com](https://facturo-ow5a.onrender.com)** — bilingual app, English & French
+<sub>Free hosting: the first load may take up to a minute. Demo limited to 10 files per day per visitor.</sub>
+
+Facturo reads **invoices and receipts** (photos or PDFs, in English or French)
+and exports them to a **clean Excel workbook** with two sheets: `Resume`
+(one row per document) and `Details` (line items). Drag-and-drop web app with
+a one-click **EN/FR** language switch, plus a command-line tool.
 
 <p align="center">
-  <img src="exemples/apercu_facturo_fr.png" alt="Interface Facturo en français" width="49%">
   <img src="exemples/apercu_facturo_en.png" alt="Facturo interface in English" width="49%">
+  <img src="exemples/apercu_facturo_fr.png" alt="Interface Facturo en français" width="49%">
 </p>
 
-## Stack technique
+## Tech stack
 
-Python 3.11 · FastAPI · LLM multimodal (API Anthropic ou OpenAI, sortie JSON
-contrainte par schéma) · pdfplumber / PyMuPDF · Pillow (HEIC) · openpyxl ·
-pytest · Docker · déploiement continu sur Render.
+Python 3.11 · FastAPI · multimodal LLM (Anthropic or OpenAI API, schema-constrained
+JSON output) · pdfplumber / PyMuPDF · Pillow (HEIC) · openpyxl · pytest · Docker ·
+continuous deployment on Render.
 
-## Ce que ça fait
+## Features
 
-- **Photos ET PDF** — `.jpg .png .heic/.heif .webp` et PDF. Les photos et les
-  PDF scannés passent par un modèle de vision ; les PDF texte par extraction
-  directe. Aucune conversion manuelle nécessaire.
-- **Extraction fiable** via LLM (Claude ou OpenAI) → JSON structuré validé.
-- **Taxes québécoises** : TPS et TVQ ventilées séparément + total.
-- **Regroupement** des pièces d'un même achat (reçu détaillé + relevé de paiement).
-- **Ajout à un Excel existant** : les nouvelles lignes s'ajoutent à la fin,
-  sans écraser — pour tenir sa compta au fil de l'eau.
-- **Contrôles de cohérence** (HT+taxes ≈ TTC, somme des lignes ≈ HT) signalés
-  dans une colonne *Alertes*.
+- **Photos AND PDFs** — `.jpg .png .heic/.heif .webp` and PDF. Photos and scanned
+  PDFs go through a vision model; text PDFs are extracted directly. No manual
+  conversion needed.
+- **Reliable extraction** via LLM → validated, structured JSON.
+- **Canadian sales taxes** — GST/TPS and QST/TVQ broken out separately; HST and
+  GST+PST handled in the tax total.
+- **Grouping** of documents from the same purchase (itemized receipt + payment slip).
+- **Append to an existing Excel file** — new rows are added at the end, nothing
+  is overwritten: keep your books up to date as you go.
+- **Consistency checks** (net + taxes ≈ total, sum of lines ≈ net) flagged in an
+  *Alertes* column.
+- **Bilingual** — interface, documents and error messages in English and French.
 
-## Démarrage rapide
+## Quick start
 
 ```bash
-python -m venv .venv && source .venv/bin/activate      # Windows : .venv\Scripts\activate
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env        # puis renseignez ANTHROPIC_API_KEY (ou OPENAI_API_KEY)
+cp .env.example .env        # then set ANTHROPIC_API_KEY (or OPENAI_API_KEY)
 
-# Interface web (http://localhost:7860)
-export $(grep -v '^#' .env | xargs)     # charge la clé
+# Web app (http://localhost:7860)
+export $(grep -v '^#' .env | xargs)     # load the key
 python interface_web.py
 
-# En ligne de commande
-python facture_vers_excel.py exemples/factures_demo/*.pdf -o sortie.xlsx
-python facture_vers_excel.py recu.heic --ajouter-a ma_compta.xlsx -o ma_compta.xlsx
+# Command line
+python facture_vers_excel.py exemples/factures_demo/*.pdf -o output.xlsx
+python facture_vers_excel.py receipt.heic --ajouter-a my_books.xlsx -o my_books.xlsx
 ```
 
-Sans clé API, le mode hors ligne fonctionne uniquement sur les PDF texte :
-`--moteur tables`.
+Without an API key, offline mode only works on text PDFs: `--moteur tables`.
 
-## Arborescence
+## Project layout
 
 ```
 facturo/
-├── facture_vers_excel.py   # moteur : extraction (PDF/vision) + Excel + CLI
-├── interface_web.py        # app web FastAPI « Facturo » (bilingue)
+├── facture_vers_excel.py   # engine: extraction (PDF/vision) + Excel + CLI
+├── interface_web.py        # FastAPI web app (bilingual EN/FR)
 ├── requirements.txt
-├── Dockerfile              # image de déploiement
+├── Dockerfile              # deployment image
 ├── LICENSE
-├── tests/                  # suite de tests portable (pytest)
-└── exemples/               # PDF de démo, générateur, aperçus de l'UI
+├── tests/                  # self-contained test suite (pytest)
+└── exemples/               # demo PDFs, generator, UI screenshots
 ```
+
+The codebase itself is written in French (function and variable names), the
+author's first language.
 
 ## Tests
 
@@ -72,23 +77,22 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Les tests sont autonomes (ils génèrent leurs propres entrées et simulent le
-LLM) : aucun appel réseau, aucune clé requise.
+The tests are self-contained (they generate their own inputs and mock the LLM):
+no network calls, no API key required.
 
-## Déploiement
+## Deployment
 
-L'application est conteneurisée (`Dockerfile`) et se déploie telle quelle sur
-toute plateforme Docker (Hugging Face Spaces, Render, Fly.io…). Elle écoute
-sur `$PORT` (défaut 7860). La clé API est fournie par variable
-d'environnement (`ANTHROPIC_API_KEY` ou `OPENAI_API_KEY`), configurée comme
-secret de la plateforme — jamais dans le code.
+The app is containerized (`Dockerfile`) and runs as-is on any Docker platform
+(Render, Fly.io, Hugging Face Spaces…). It listens on `$PORT` (default 7860).
+The API key is provided through an environment variable (`ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY`) stored as a platform secret — never in the code.
 
-Pour protéger le crédit API d'une démo publique, un quota journalier est
-appliqué : `QUOTA_JOUR_TOTAL` (défaut 30 fichiers/jour) et
-`QUOTA_JOUR_VISITEUR` (défaut 10 fichiers/jour par adresse IP).
+To protect the API budget of a public demo, a daily quota applies:
+`QUOTA_JOUR_TOTAL` (default 30 files/day) and `QUOTA_JOUR_VISITEUR` (default
+10 files/day per IP address).
 
-## Licence
+## License
 
-© 2026 Mohamed Luc Aurel Degnon — tous droits réservés. Le code est publié
-pour consultation ; toute réutilisation, copie ou redistribution nécessite une
-autorisation écrite. Voir [LICENSE](LICENSE).
+© 2026 Mohamed Luc Aurel Degnon — all rights reserved. The code is published for
+viewing only; any reuse, copying or redistribution requires written permission.
+See [LICENSE](LICENSE).
