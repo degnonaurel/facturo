@@ -1,22 +1,24 @@
----
-title: Facturo
-emoji: 🧾
-colorFrom: green
-colorTo: orange
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # Facturo — de la photo au tableur
+
+**▶ Démo en ligne : [facturo-ow5a.onrender.com](https://facturo-ow5a.onrender.com)**
+<sub>Hébergement gratuit : le premier chargement peut prendre jusqu'à une minute.
+Démo limitée à 10 fichiers par jour et par visiteur.</sub>
 
 Facturo lit vos **factures et reçus** (photos ou PDF, FR/EN) et les exporte
 dans un **Excel propre** à deux feuilles : `Resume` (une ligne par pièce) et
 `Details` (les lignes de facture). Interface web glisser-déposer bilingue,
 plus un outil en ligne de commande.
 
-> Le bloc `---` en haut de ce fichier sert à **Hugging Face Spaces** (build
-> Docker sur le port 7860). GitHub l'ignore visuellement.
+<p align="center">
+  <img src="exemples/apercu_facturo_fr.png" alt="Interface Facturo en français" width="49%">
+  <img src="exemples/apercu_facturo_en.png" alt="Facturo interface in English" width="49%">
+</p>
+
+## Stack technique
+
+Python 3.11 · FastAPI · LLM multimodal (API Anthropic ou OpenAI, sortie JSON
+contrainte par schéma) · pdfplumber / PyMuPDF · Pillow (HEIC) · openpyxl ·
+pytest · Docker · déploiement continu sur Render.
 
 ## Ce que ça fait
 
@@ -57,7 +59,8 @@ facturo/
 ├── facture_vers_excel.py   # moteur : extraction (PDF/vision) + Excel + CLI
 ├── interface_web.py        # app web FastAPI « Facturo » (bilingue)
 ├── requirements.txt
-├── Dockerfile              # déploiement (Hugging Face, Render…)
+├── Dockerfile              # image de déploiement
+├── LICENSE
 ├── tests/                  # suite de tests portable (pytest)
 └── exemples/               # PDF de démo, générateur, aperçus de l'UI
 ```
@@ -80,6 +83,12 @@ sur `$PORT` (défaut 7860). La clé API est fournie par variable
 d'environnement (`ANTHROPIC_API_KEY` ou `OPENAI_API_KEY`), configurée comme
 secret de la plateforme — jamais dans le code.
 
+Pour protéger le crédit API d'une démo publique, un quota journalier est
+appliqué : `QUOTA_JOUR_TOTAL` (défaut 30 fichiers/jour) et
+`QUOTA_JOUR_VISITEUR` (défaut 10 fichiers/jour par adresse IP).
+
 ## Licence
 
-À définir (MIT recommandé pour un produit que vous distribuez).
+© 2026 Mohamed Luc Aurel Degnon — tous droits réservés. Le code est publié
+pour consultation ; toute réutilisation, copie ou redistribution nécessite une
+autorisation écrite. Voir [LICENSE](LICENSE).

@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 
 import facture_vers_excel as fve
@@ -42,6 +44,38 @@ def _pret() -> bool:
     return bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY"))
 
 
+# Quota de démo : protège le crédit API d'un lien public. Compteurs en mémoire
+# (fichiers traités par jour), remis à zéro chaque jour et au redémarrage.
+QUOTA_JOUR_TOTAL = int(os.getenv("QUOTA_JOUR_TOTAL", "30"))
+QUOTA_JOUR_VISITEUR = int(os.getenv("QUOTA_JOUR_VISITEUR", "10"))
+_FUSEAU = timezone(timedelta(hours=-5))   # heure normale de l'Est (Ottawa)
+_quota = {"jour": None, "total": 0, "visiteurs": {}}
+_verrou_quota = threading.Lock()
+
+
+def _visiteur(request: Request) -> str:
+    # Derrière le proxy de l'hébergeur, l'IP réelle est dans X-Forwarded-For.
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "inconnu"
+
+
+def _reserver_quota(visiteur: str, n: int) -> bool:
+    """Réserve n fichiers dans le quota du jour ; False si dépassement."""
+    jour = datetime.now(_FUSEAU).date()
+    with _verrou_quota:
+        if _quota["jour"] != jour:
+            _quota.update(jour=jour, total=0, visiteurs={})
+        deja = _quota["visiteurs"].get(visiteur, 0)
+        if (_quota["total"] + n > QUOTA_JOUR_TOTAL
+                or deja + n > QUOTA_JOUR_VISITEUR):
+            return False
+        _quota["total"] += n
+        _quota["visiteurs"][visiteur] = deja + n
+        return True
+
+
 @app.get("/api/statut")
 def statut():
     # On n'expose jamais le nom du moteur : seulement l'état de service.
@@ -49,8 +83,11 @@ def statut():
 
 
 @app.post("/api/extraire")
-async def extraire(fichiers: list[UploadFile] = File(...),
+async def extraire(request: Request,
+                   fichiers: list[UploadFile] = File(...),
                    base: Optional[UploadFile] = File(None)):
+    if not _reserver_quota(_visiteur(request), len(fichiers)):
+        return JSONResponse({"quota_atteint": True}, status_code=429)
     factures, erreurs = [], []
     with tempfile.TemporaryDirectory() as tmp:
         # Excel existant optionnel : les nouvelles lignes y seront ajoutées.
@@ -320,7 +357,8 @@ const I18N = {
     base_choisi:"Excel de base :", ajoute_note:"Nouvelles lignes ajoutées à votre fichier.",
     res:"Résultat", tel:"Télécharger l'Excel", pied:"Facturo — vos données ne servent qu'à produire votre tableur.",
     th_f:"Fournisseur", th_n:"N°", th_d:"Date", th_ht:"HT", th_tps:"TPS", th_tvq:"TVQ", th_tx:"Taxes", th_ttc:"TTC", th_l:"Lignes",
-    regroupe:"regroupé avec", pieces:"pièce(s)", aucune:"Aucune donnée n'a pu être extraite.", reseau:"Erreur réseau : " },
+    regroupe:"regroupé avec", pieces:"pièce(s)", aucune:"Aucune donnée n'a pu être extraite.", reseau:"Erreur réseau : ",
+    quota:"Limite de la démo atteinte pour aujourd'hui. Revenez demain !" },
   en:{ statut_check:"Checking…", statut_on:"Service online", statut_off:"Service unavailable",
     hero1:"Your invoices and receipts,", hero2:"in Excel — from a photo.",
     sous:"Drop a photo or a PDF. You get a clean spreadsheet, ready for bookkeeping — in seconds.",
@@ -332,7 +370,8 @@ const I18N = {
     base_choisi:"Base Excel:", ajoute_note:"New rows appended to your file.",
     res:"Result", tel:"Download the Excel", pied:"Facturo — your data is only used to produce your spreadsheet.",
     th_f:"Vendor", th_n:"No.", th_d:"Date", th_ht:"Net", th_tps:"GST", th_tvq:"QST", th_tx:"Tax", th_ttc:"Total", th_l:"Items",
-    regroupe:"merged with", pieces:"item(s)", aucune:"No data could be extracted.", reseau:"Network error: " }
+    regroupe:"merged with", pieces:"item(s)", aucune:"No data could be extracted.", reseau:"Network error: ",
+    quota:"Today's demo limit has been reached. Please come back tomorrow!" }
 };
 let LANG = localStorage.getItem('facturo_lang') || (navigator.language||'fr').slice(0,2);
 if(LANG!=='en') LANG='fr';
@@ -401,7 +440,8 @@ btn.onclick=async()=>{
   if(baseExcel)fd.append('base',baseExcel,baseExcel.name);
   try{
     const r=await fetch('/api/extraire',{method:'POST',body:fd});
-    dernier=await r.json(); afficher(dernier);
+    if(r.status===429){dernier=null;errBox.textContent=T('quota');}
+    else{dernier=await r.json(); afficher(dernier);}
   }catch(e){errBox.textContent=T('reseau')+e;}
   etat.textContent=''; btn.disabled=false;
 };

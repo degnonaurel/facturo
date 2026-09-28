@@ -50,3 +50,23 @@ def test_ajout_a_base_via_web(tmp_path):
     xl = client.get("/telecharger/" + d["download_id"]).content
     wb = load_workbook(io.BytesIO(xl))
     assert wb["Resume"].max_row - 1 == 2  # 1 existante + 1 nouvelle
+
+
+def test_quota_de_demo(tmp_path, monkeypatch):
+    monkeypatch.setattr(interface_web, "QUOTA_JOUR_VISITEUR", 2)
+    monkeypatch.setattr(interface_web, "_quota",
+                        {"jour": None, "total": 0, "visiteurs": {}})
+    pdf = pdf_facture_demo(str(tmp_path / "f.pdf"))
+    with open(pdf, "rb") as fh:
+        contenu = fh.read()
+
+    def envoyer(n, ip):
+        files = [("fichiers", (f"f{i}.pdf", contenu, "application/pdf"))
+                 for i in range(n)]
+        return client.post("/api/extraire", files=files,
+                           headers={"X-Forwarded-For": ip})
+
+    assert envoyer(2, "1.1.1.1").status_code == 200
+    r = envoyer(1, "1.1.1.1")                    # 3e fichier du jour : refusé
+    assert r.status_code == 429 and r.json()["quota_atteint"] is True
+    assert envoyer(1, "2.2.2.2").status_code == 200   # autre visiteur : OK
