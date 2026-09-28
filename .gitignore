@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Secrets / environnement
+.env
+*.key
+
+# Sorties générées
+*.xlsx
+!exemples/**/*.xlsx
+/tmp/
+
+# Fichiers temporaires de test
+tests/_tmp/
+photos_test/
+apercu_*.html
+
+# OS / éditeurs
+.DS_Store
+.idea/
+.vscode/
