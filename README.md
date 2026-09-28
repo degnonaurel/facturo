@@ -58,8 +58,6 @@ facturo/
 ├── interface_web.py        # app web FastAPI « Facturo » (bilingue)
 ├── requirements.txt
 ├── Dockerfile              # déploiement (Hugging Face, Render…)
-├── GUIDE_HEBERGEMENT.md    # guide pas-à-pas pour héberger gratuitement
-├── CLAUDE.md               # contexte projet pour Claude Code
 ├── tests/                  # suite de tests portable (pytest)
 └── exemples/               # PDF de démo, générateur, aperçus de l'UI
 ```
@@ -67,7 +65,7 @@ facturo/
 ## Tests
 
 ```bash
-pip install pytest
+pip install -r requirements-dev.txt
 pytest -q
 ```
 
@@ -76,8 +74,11 @@ LLM) : aucun appel réseau, aucune clé requise.
 
 ## Déploiement
 
-Voir **GUIDE_HEBERGEMENT.md**. En résumé : Hugging Face Spaces (Docker) ou
-Render, avec la clé API stockée en **secret** (jamais dans le code).
+L'application est conteneurisée (`Dockerfile`) et se déploie telle quelle sur
+toute plateforme Docker (Hugging Face Spaces, Render, Fly.io…). Elle écoute
+sur `$PORT` (défaut 7860). La clé API est fournie par variable
+d'environnement (`ANTHROPIC_API_KEY` ou `OPENAI_API_KEY`), configurée comme
+secret de la plateforme — jamais dans le code.
 
 ## Licence
 

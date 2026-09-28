@@ -305,7 +305,7 @@ def _appeler_claude(texte, images, modele, timeout):
     if not cle:
         raise ErreurLLM("ANTHROPIC_API_KEY non définie.")
     base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
-    modele = modele or os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+    modele = modele or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 
     contenu: list[dict[str, Any]] = []
     for media_type, b64 in (images or []):
