@@ -514,6 +514,13 @@ def _vers_facture(chemin: str, brut: dict[str, Any], moteur: str,
         devise=normaliser_devise(brut.get("devise")),
         lignes=lignes, moteur=moteur,
         categorie=libelle_compte(plan, brut.get("compte")))
+    # La pièce prend la catégorie qui pèse le plus dans ses articles.
+    poids: dict[str, float] = {}
+    for l in lignes:
+        if l.categorie and l.montant:
+            poids[l.categorie] = poids.get(l.categorie, 0) + l.montant
+    if poids:
+        f.categorie = max(poids, key=poids.get)
     f.valider_coherence()
     return f
 
@@ -1121,7 +1128,7 @@ def _ecrire_totaux_categories(wb, ws, pos_r, wd, pos_d, langue: str) -> None:
         if n.strip().lower() in _noms_connus("Totaux par catégorie"):
             wb.remove(wb[n])
     cols = ["Catégorie", "Devise", "Nb factures"] + list(_COLS_MONTANTS)
-    wt = wb.create_sheet(_titre("Totaux par catégorie", langue))
+    wt = wb.create_sheet(_titre("Totaux par catégorie", langue), index=2)
     wt.append([_titre(c, langue) for c in cols])
     _entete(wt, len(cols))
     groupes = _repartition_categories(ws, pos_r, wd, pos_d, langue)
@@ -1187,8 +1194,6 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
     _ajouter_totaux(ws, pos_r, langue)
     _largeurs(ws)
 
-    _ecrire_totaux_categories(wb, ws, pos_r, wd, pos_d, langue)
-
     plan = plan or _plan_de_classeur(wb)
     if plan:
         plan_ws = _ecrire_plan(wb, plan, langue)
@@ -1205,6 +1210,9 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
             for cle in ("Prix unitaire", "Montant"):
                 wd.cell(row=r, column=pos_d[cle]).number_format = _MON
     _largeurs(wd)
+
+    # Après l'écriture du résumé ET des articles (base de la répartition).
+    _ecrire_totaux_categories(wb, ws, pos_r, wd, pos_d, langue)
 
     wb.save(chemin_sortie)
     return chemin_sortie

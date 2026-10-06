@@ -153,3 +153,16 @@ def test_traitement_en_parallele_garde_l_ordre(monkeypatch):
     res = fve.traiter_lot(["a", "mauvais", "c", "d"], paralleles=4)
     assert res[0] == "A" and isinstance(res[1], fve.ErreurLLM) and res[2:] == ["C", "D"]
     assert maxi[0] > 1                           # vraiment en parallèle
+
+
+def test_repartition_des_le_premier_export(tmp_path):
+    f, plan = _piece("Consult", "X1", 100, 13, 113, "5260",
+                     [("Audit", 40, "5260"), ("SEO", 60, "5200")])
+    assert f.categorie == "5200 · Publicité et marketing"     # plus gros montant
+    sortie = str(tmp_path / "un.xlsx")
+    fve.construire_excel([f], sortie, plan=plan)
+    wb = load_workbook(sortie)
+    assert wb.sheetnames[2] == "Totaux par catégorie"
+    lignes = {r[0]: r for r in wb["Totaux par catégorie"].iter_rows(min_row=2, values_only=True)}
+    assert lignes["5260 · Honoraires professionnels"][3] == 40
+    assert lignes["5200 · Publicité et marketing"][3] == 60
