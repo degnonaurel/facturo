@@ -4,7 +4,8 @@
 facture_vers_excel.py  —  V2.1
 =================================================================
 Extrait les données de factures et de reçus et les exporte dans un
-tableur Excel propre (2 feuilles : « Resume » et « Details »).
+tableur Excel propre (2 feuilles : « Resume » et « Details »), et en
+option dans un CSV d'import de factures fournisseurs QuickBooks Online.
 
 Deux entrées acceptées, sans conversion préalable :
     - PDF « texte » (factures générées par ordinateur)  -> extraction texte
@@ -1219,6 +1220,124 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
 
 
 # =================================================================
+#  6 bis. EXPORT QUICKBOOKS ONLINE (Canada) — import de factures fournisseurs
+# =================================================================
+# Format du CSV « Import data > Bills » de QuickBooks Online Canada.
+# Colonnes obligatoires : Bill no., Supplier, Bill Date, Due Date, Account,
+# Line Amount, Line Tax Code. Une facture à plusieurs articles = plusieurs
+# lignes répétant n°, fournisseur et date. Montants HORS taxes : à l'import,
+# choisir « Exclusive » et le format de date JJ/MM/AAAA. Fournisseurs et
+# comptes doivent exister dans QuickBooks (d'où l'import du plan comptable
+# exporté de QuickBooks : la colonne Account reprend le NOM du compte).
+
+COLS_QBO = ["Bill no.", "Supplier", "Bill Date", "Due Date", "Memo", "Account",
+            "Line Description", "Line Amount", "Line Tax Code", "Line Tax Amount",
+            "Currency Code"]
+
+# Codes de taxe standard de QuickBooks Online Canada (modifiables par client).
+CODES_TAXE_QBO = {
+    "GST": "GST",                       # TPS seule (5 %)
+    "GST/QST": "GST/QST QC - 9.975",    # TPS + TVQ (14,975 %)
+    "HST ON": "HST ON",                 # TVH Ontario (13 %)
+    "EXEMPT": "Exempt",                 # aucune taxe facturée
+    "OUT OF SCOPE": "Out of Scope",     # achat hors Canada
+}
+# Taux reconnus (taxes / HT) → clé de CODES_TAXE_QBO.
+_TAUX_QBO = [(0.05, "GST"), (0.13, "HST ON"), (0.14975, "GST/QST")]
+
+
+def code_taxe_qbo(f: Facture) -> str:
+    """Code de taxe QuickBooks d'une pièce, déduit de ses taxes (vide si inconnu)."""
+    taxes = f.tva if f.tva is not None else (
+        (f.tps or 0) + (f.tvq or 0) if (f.tps or f.tvq) else None)
+    if f.tvq:
+        return CODES_TAXE_QBO["GST/QST"]
+    if not taxes:
+        if f.devise and f.devise != "CAD":
+            return CODES_TAXE_QBO["OUT OF SCOPE"]
+        # Taxes inconnues (None) : on ne présume pas d'exonération.
+        return CODES_TAXE_QBO["EXEMPT"] if taxes == 0 else ""
+    if f.tps and abs(f.tps - taxes) <= 0.02:
+        return CODES_TAXE_QBO["GST"]
+    if f.total_ht:
+        taux = taxes / f.total_ht
+        for t, cle in _TAUX_QBO:
+            if abs(taux - t) <= 0.004:
+                return CODES_TAXE_QBO[cle]
+    return ""
+
+
+def _date_qbo(d: str) -> str:
+    """AAAA-MM-JJ → JJ/MM/AAAA ; toute autre forme est laissée telle quelle."""
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", (d or "").strip())
+    return f"{int(m[3]):02d}/{int(m[2]):02d}/{m[1]}" if m else (d or "")
+
+
+def _nom_compte(plan: Optional[list[dict]], libelle: str) -> str:
+    """« 5320 · Location de véhicule » → nom du compte tel que dans QuickBooks."""
+    for c in plan or []:
+        if libelle and libelle == libelle_compte(plan, _id_compte(c)):
+            return c["nom"]
+    return re.sub(r"^\S+\s·\s", "", libelle or "")
+
+
+def lignes_qbo(f: Facture, plan: Optional[list[dict]] = None) -> list[dict]:
+    """
+    Lignes du CSV QuickBooks pour une pièce : une par article quand leur
+    somme correspond au HT (chaque article garde son compte), sinon une
+    seule ligne au montant HT dans le compte de la pièce.
+    """
+    taxes = f.tva if f.tva is not None else (
+        round((f.tps or 0) + (f.tvq or 0), 2) if (f.tps or f.tvq) else None)
+    ht = f.total_ht
+    if ht is None and f.total_ttc is not None:
+        ht = round(f.total_ttc - (taxes or 0), 2)
+    numero = f.numero or os.path.splitext(f.fichier)[0]
+    memo = " | ".join(x for x in (f.fichier, *f.alertes) if x)
+    commun = {"Bill no.": numero, "Supplier": f.fournisseur,
+              "Bill Date": _date_qbo(f.date), "Due Date": _date_qbo(f.date),
+              "Memo": memo, "Line Tax Code": code_taxe_qbo(f),
+              "Currency Code": f.devise}
+
+    articles = [l for l in f.lignes if l.montant is not None]
+    somme = round(sum(l.montant for l in articles), 2)
+    if articles and ht is not None and abs(somme - ht) <= max(0.02, abs(ht) * 0.005):
+        res, reste = [], taxes
+        for i, l in enumerate(articles):
+            part = None
+            if taxes is not None and somme:
+                part = round(taxes * l.montant / somme, 2)
+                if i == len(articles) - 1:      # le dernier absorbe l'arrondi
+                    part = round(reste, 2)
+                reste -= part
+            res.append(dict(commun, **{
+                "Account": _nom_compte(plan, l.categorie or f.categorie),
+                "Line Description": l.description, "Line Amount": l.montant,
+                "Line Tax Amount": part}))
+        return res
+    desc = ", ".join(l.description for l in f.lignes if l.description)[:4000]
+    return [dict(commun, **{"Account": _nom_compte(plan, f.categorie),
+                            "Line Description": desc, "Line Amount": ht,
+                            "Line Tax Amount": taxes})]
+
+
+def construire_csv_qbo(factures: list[Facture], chemin_sortie: str,
+                       plan: Optional[list[dict]] = None) -> str:
+    """Écrit le CSV d'import de factures fournisseurs de QuickBooks Online."""
+    import csv
+
+    def texte(v):
+        return "" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
+    with open(chemin_sortie, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=COLS_QBO)
+        w.writeheader()
+        for f in factures:
+            for ligne in lignes_qbo(f, plan):
+                w.writerow({k: texte(v) for k, v in ligne.items()})
+    return chemin_sortie
+
+
+# =================================================================
 #  7. CLI
 # =================================================================
 
@@ -1242,6 +1361,9 @@ def _parseur():
                    help="Nombre de fichiers lus en même temps (défaut 4).")
     p.add_argument("--langue", choices=["fr", "en"], default="fr",
                    help="Langue des titres de l'Excel (fr ou en).")
+    p.add_argument("--qbo", default=None, metavar="FACTURES_QBO.csv",
+                   help="Écrit aussi le CSV d'import de factures fournisseurs "
+                        "de QuickBooks Online (Canada).")
     p.add_argument("--json", action="store_true")
     return p
 
@@ -1289,6 +1411,9 @@ def main(argv=None):
                               langue=args.langue, plan=plan)
     suffixe = f" (ajoutées à {os.path.basename(base)})" if base else ""
     print(f"\n✓ {len(factures)} facture(s) -> {chemin}{suffixe}", file=sys.stderr)
+    if args.qbo:
+        construire_csv_qbo(factures, args.qbo, plan=plan)
+        print(f"✓ Import QuickBooks Online -> {args.qbo}", file=sys.stderr)
     return 0
 
 

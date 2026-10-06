@@ -46,6 +46,13 @@ pytest · Docker · déploiement continu sur Render.
 - **Totaux cumulés** — une ligne TOTAL par devise en bas du résumé (nombre de
   factures, HT, TPS, TVQ, taxes, TTC), recalculée à chaque ajout ; l'app web
   affiche aussi le total cumulé du fichier.
+- **Export QuickBooks Online** — en plus de l'Excel, un CSV au format d'import
+  de factures fournisseurs de QuickBooks Online Canada (*Paramètres › Importer
+  des données › Factures*) : une ligne par article, noms de comptes de votre plan
+  comptable (importez le plan exporté de QuickBooks), montants hors taxes et
+  code de taxe canadien correspondant (`GST`, `HST ON`, `GST/QST QC - 9.975`,
+  `Exempt`, `Out of Scope`). À l'import, choisir les taxes « Exclusive » et le
+  format de date JJ/MM/AAAA.
 - **Contrôles de cohérence** (HT + taxes ≈ TTC, somme des lignes ≈ HT)
   signalés dans une colonne *Alertes*.
 - **Bilingue** — interface et pièces en français et en anglais ; l'Excel (noms
@@ -66,6 +73,7 @@ python interface_web.py
 # En ligne de commande
 python facture_vers_excel.py exemples/factures_demo/*.pdf -o sortie.xlsx
 python facture_vers_excel.py recu.heic --ajouter-a ma_compta.xlsx -o ma_compta.xlsx
+python facture_vers_excel.py *.pdf --plan comptes_qbo.xlsx -o sortie.xlsx --qbo factures_qbo.csv
 ```
 
 Sans clé API, le mode hors ligne fonctionne uniquement sur les PDF texte :

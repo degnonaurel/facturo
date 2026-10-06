@@ -44,6 +44,13 @@ continuous deployment on Render.
 - **Running totals** — a TOTAL row per currency at the bottom of the summary
   (invoice count, subtotal, GST, QST, tax, total), recalculated on every append;
   the web app also shows the cumulative file total.
+- **QuickBooks Online export** — alongside the Excel file, a CSV in the
+  QuickBooks Online Canada bill import format (*Settings › Import data › Bills*):
+  one row per line item, account names from your chart of accounts (import the
+  chart exported from QuickBooks), amounts before tax, and the matching
+  Canadian tax code (`GST`, `HST ON`, `GST/QST QC - 9.975`, `Exempt`,
+  `Out of Scope`). Choose *Exclusive* tax and the DD/MM/YYYY date format when
+  importing.
 - **Consistency checks** (net + taxes ≈ total, sum of lines ≈ net) flagged in an
   *Warnings* column (*Alertes* in French).
 - **Bilingual** — interface and documents in English and French; the Excel file
@@ -64,6 +71,7 @@ python interface_web.py
 # Command line
 python facture_vers_excel.py exemples/factures_demo/*.pdf -o output.xlsx
 python facture_vers_excel.py receipt.heic --ajouter-a my_books.xlsx -o my_books.xlsx
+python facture_vers_excel.py *.pdf --plan qbo_accounts.xlsx -o output.xlsx --qbo bills_qbo.csv
 ```
 
 Without an API key, offline mode only works on text PDFs: `--moteur tables`.

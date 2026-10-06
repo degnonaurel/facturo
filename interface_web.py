@@ -176,6 +176,12 @@ async def extraire(request: Request,
                                         f"Excel existant illisible, nouveau fichier créé ({e})")})
             fve.construire_excel(factures, chemin, langue=langue, plan=plan_comptable)
         _TELECHARGEMENTS[jeton] = chemin
+        # CSV QuickBooks Online : seulement les pièces de cet envoi (pas de doublon
+        # à l'import quand on ajoute à un Excel existant).
+        try:
+            fve.construire_csv_qbo(factures, chemin[:-5] + "_qbo.csv", plan=plan_comptable)
+        except Exception as e:
+            erreurs.append({"fichier": "QuickBooks", "message": str(e)})
         try:
             totaux = fve.totaux_resume(chemin)
         except Exception:
@@ -195,8 +201,14 @@ async def extraire(request: Request,
 
 
 @app.get("/telecharger/{jeton}")
-def telecharger(jeton: str):
+def telecharger(jeton: str, format: str = "xlsx"):
     chemin = _TELECHARGEMENTS.get(jeton)
+    if chemin and format == "qbo":
+        chemin = chemin[:-5] + "_qbo.csv"
+        if not os.path.isfile(chemin):
+            return JSONResponse({"erreur": "Fichier introuvable ou expiré."}, status_code=404)
+        return FileResponse(chemin, media_type="text/csv",
+                            filename="facturo_quickbooks.csv")
     if not chemin or not os.path.isfile(chemin):
         return JSONResponse({"erreur": "Fichier introuvable ou expiré."}, status_code=404)
     return FileResponse(
@@ -296,6 +308,10 @@ _PAGE = r"""<!DOCTYPE html>
        font-family:"Space Grotesk",sans-serif;display:inline-flex;gap:8px;align-items:center;
        box-shadow:0 6px 16px color-mix(in srgb,var(--acc) 38%,transparent)}
   .tel:hover{filter:brightness(.96)}
+  .tels{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .tel2{color:var(--pri);text-decoration:none;border:1px solid var(--bord);border-radius:12px;padding:12px 18px;
+        font-weight:600;font-family:"Space Grotesk",sans-serif;display:inline-flex;gap:8px;align-items:center}
+  .tel2:hover{border-color:var(--pri)}
   .spin{width:17px;height:17px;border:3px solid var(--bord);border-top-color:var(--pri);border-radius:50%;
         animation:t .8s linear infinite;display:inline-block;vertical-align:middle}
   @keyframes t{to{transform:rotate(360deg)}}
@@ -413,7 +429,10 @@ _PAGE = r"""<!DOCTYPE html>
       <div class="carte p24">
         <div class="res-tete">
           <div><h2 id="titreRes" data-i18n="res">Résultat</h2><span id="ajouteNote" class="lie"></span></div>
-          <a id="tel" class="tel" href="#"><span>⬇</span><span data-i18n="tel">Télécharger l'Excel</span></a>
+          <div class="tels">
+            <a id="tel" class="tel" href="#"><span>⬇</span><span data-i18n="tel">Télécharger l'Excel</span></a>
+            <a id="telQbo" class="tel2" href="#" title=""><span>⬇</span><span data-i18n="tel_qbo">CSV QuickBooks Online</span></a>
+          </div>
         </div>
         <div style="overflow-x:auto"><table id="tab"></table></div>
         <div id="cumul" class="cumul masque"></div>
@@ -443,7 +462,8 @@ const I18N = {
     e3t:"Téléchargez", e3d:"Un Excel propre, prêt pour la compta.",
     base_btn:"Ajouter à un Excel existant", base_hint:"optionnel — les nouvelles lignes s'ajoutent à la fin de votre fichier",
     base_choisi:"Excel de base :", ajoute_note:"Nouvelles lignes ajoutées à votre fichier.",
-    res:"Résultat", tel:"Télécharger l'Excel", pied:"Facturo — vos données ne servent qu'à produire votre tableur.",
+    res:"Résultat", tel:"Télécharger l'Excel", tel_qbo:"CSV QuickBooks Online",
+    qbo_aide:"Factures fournisseurs à importer dans QuickBooks Online (Paramètres > Importer des données > Factures) : montants hors taxes, dates JJ/MM/AAAA.", pied:"Facturo — vos données ne servent qu'à produire votre tableur.",
     th_f:"Fournisseur", th_n:"N°", th_d:"Date", th_ht:"HT", th_tps:"TPS", th_tvq:"TVQ", th_tx:"Taxes", th_ttc:"TTC", th_l:"Lignes",
     regroupe:"regroupé avec", pieces:"pièce(s)", aucune:"Aucune donnée n'a pu être extraite.", reseau:"Erreur réseau : ",
     quota:"Limite de la démo atteinte pour aujourd'hui. Revenez demain !",
@@ -465,7 +485,8 @@ const I18N = {
     e3t:"Download", e3d:"A clean Excel, ready for your books.",
     base_btn:"Add to an existing Excel", base_hint:"optional — new rows are appended to the end of your file",
     base_choisi:"Base Excel:", ajoute_note:"New rows appended to your file.",
-    res:"Result", tel:"Download the Excel", pied:"Facturo — your data is only used to produce your spreadsheet.",
+    res:"Result", tel:"Download the Excel", tel_qbo:"QuickBooks Online CSV",
+    qbo_aide:"Bills to import into QuickBooks Online (Settings > Import data > Bills): amounts exclude tax, dates DD/MM/YYYY.", pied:"Facturo — your data is only used to produce your spreadsheet.",
     th_f:"Vendor", th_n:"No.", th_d:"Date", th_ht:"Net", th_tps:"GST", th_tvq:"QST", th_tx:"Tax", th_ttc:"Total", th_l:"Items",
     regroupe:"merged with", pieces:"item(s)", aucune:"No data could be extracted.", reseau:"Network error: ",
     quota:"Today's demo limit has been reached. Please come back tomorrow!",
@@ -596,7 +617,8 @@ function afficher(d){
   const cumul=document.getElementById('cumul'), tot=d.totaux_fichier||[];
   cumul.innerHTML=tot.map(t=>`Σ ${T('cumul')} : <b>${fmt(t.total_ttc)} ${t.devise}</b> · ${T('dont_taxes')} ${fmt(t.taxes)} ${t.devise} · ${t.nb} ${T('nb_fact')}`).join('<br>');
   cumul.classList.toggle('masque',!tot.length);
-  if(d.download_id)tel.href='/telecharger/'+d.download_id;
+  if(d.download_id){tel.href='/telecharger/'+d.download_id;
+    const q=document.getElementById('telQbo'); q.href='/telecharger/'+d.download_id+'?format=qbo'; q.title=T('qbo_aide');}
   res.classList.remove('masque'); res.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
