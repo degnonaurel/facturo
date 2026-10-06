@@ -3,7 +3,6 @@
 from _helpers import RACINE, pdf_facture_demo  # noqa: F401  (ajuste sys.path)
 import facture_vers_excel as fve
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 
 
 def _fac(nom, four, ttc, n_lignes, date="2026-09-01"):
@@ -144,23 +143,30 @@ def test_bascule_fr_en_fr(tmp_path):
 
 
 def test_totaux_cumules_mis_a_jour(tmp_path):
-    """Une ligne TOTAL par devise, recalculée en bas à chaque ajout."""
+    """Une ligne TOTAL par devise, recalculée en bas à chaque ajout ;
+    « $ » seul compte comme CAD."""
     base = str(tmp_path / "compta.xlsx")
     fve.construire_excel([_facture_test("a.pdf", "1")], base)
-    fve.construire_excel([_facture_test("b.pdf", "2")], base, base_excel=base)
+    dollar = _facture_test("b.pdf", "2")
+    dollar.devise = fve.normaliser_devise("$")
+    fve.construire_excel([dollar], base, base_excel=base)
     usd = _facture_test("c.pdf", "3")
-    usd.devise = "USD"
+    usd.devise = fve.normaliser_devise("US$")
     fve.construire_excel([usd], base, base_excel=base, langue="en")
 
     ws = load_workbook(base)["Summary"]
     col = [c.value for c in ws[1]]
     fichiers = [ws.cell(r, 1).value for r in range(2, ws.max_row + 1)]
     assert fichiers == ["a.pdf", "b.pdf", "c.pdf", "TOTAL CAD", "TOTAL USD"]
-    ttc = get_column_letter(col.index("Total") + 1)
-    dev = get_column_letter(col.index("Currency") + 1)
-    assert ws[f"{ttc}5"].value == f'=SUMIF(${dev}$2:${dev}$4,"CAD",${ttc}$2:${ttc}$4)'
-    assert "invoice(s)" in ws.cell(5, 2).value
+    assert ws.cell(5, col.index("Total") + 1).value == 198.0      # valeur, pas formule
+    assert ws.cell(5, col.index("Tax") + 1).value == 10.12
+    assert ws.cell(5, 2).value == "2 invoice(s)"
 
     totaux = {t["devise"]: t for t in fve.totaux_resume(base)}
     assert totaux["CAD"]["nb"] == 2 and totaux["CAD"]["total_ttc"] == 198.0
-    assert totaux["CAD"]["taxes"] == 10.12 and totaux["USD"]["nb"] == 1
+    assert totaux["USD"]["nb"] == 1
+
+
+def test_normaliser_devise():
+    assert [fve.normaliser_devise(v) for v in ("$", "cad", "US$", "€", None)] == \
+        ["CAD", "CAD", "USD", "EUR", ""]
