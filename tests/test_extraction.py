@@ -52,7 +52,7 @@ def test_ajout_a_excel_existant(tmp_path):
     fve.construire_excel([_fac("a.pdf", "Alpha", 10, 2)], base)
     fve.construire_excel([_fac("b.jpg", "Beta", 20, 1)], base, base_excel=base)
     wb = load_workbook(base)
-    assert wb.sheetnames == ["Resume", "Details"]
+    assert wb.sheetnames == ["Resume", "Details", "Totaux par catégorie"]
     noms = [wb["Resume"].cell(i, 2).value for i in range(2, wb["Resume"].max_row + 1)
             if not fve._est_ligne_total(wb["Resume"].cell(i, 1).value)]
     assert noms == ["Alpha", "Beta"]
@@ -106,14 +106,14 @@ def test_excel_en_anglais(tmp_path):
     sortie = str(tmp_path / "en.xlsx")
     fve.construire_excel([_facture_test()], sortie, langue="en")
     wb = load_workbook(sortie)
-    assert wb.sheetnames == ["Summary", "Details"]
+    assert wb.sheetnames == ["Summary", "Details", "Totals by category"]
     titres = [c.value for c in wb["Summary"][1]]
     assert titres[:6] == ["File", "Vendor", "Invoice No.", "Date", "Currency", "Subtotal"]
     assert "Warnings" in titres and "Moteur" not in titres
     alerte = wb["Summary"].cell(2, titres.index("Warnings") + 1).value
     assert alerte.startswith("Subtotal+tax") and "≠ total" in alerte
     assert [c.value for c in wb["Details"][1]][3:] == [
-        "Description", "Quantity", "Unit price", "Amount"]
+        "Description", "Quantity", "Unit price", "Amount", "Category"]
 
 
 def test_bascule_fr_en_fr(tmp_path):
@@ -127,7 +127,7 @@ def test_bascule_fr_en_fr(tmp_path):
     fve.construire_excel([_facture_test("b.pdf", "2")], en, base_excel=fr, langue="en")
 
     wb = load_workbook(en)
-    assert wb.sheetnames == ["Summary", "Details"]
+    assert wb.sheetnames == ["Summary", "Details", "Totals by category"]
     ws = wb["Summary"]
     titres = [c.value for c in ws[1]]
     assert titres == [fve._EN[c] for c in fve._COLS_RESUME]   # aucune colonne en double
@@ -137,7 +137,7 @@ def test_bascule_fr_en_fr(tmp_path):
 
     fve.construire_excel([_facture_test("c.pdf", "3")], fr2, base_excel=en, langue="fr")
     wb = load_workbook(fr2)
-    assert wb.sheetnames == ["Resume", "Details"]
+    assert wb.sheetnames == ["Resume", "Details", "Totaux par catégorie"]
     assert [c.value for c in wb["Resume"][1]] == fve._COLS_RESUME
     assert wb["Resume"].max_row == 5                  # 3 pièces + 1 TOTAL
 

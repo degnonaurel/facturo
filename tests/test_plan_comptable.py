@@ -72,7 +72,7 @@ def test_categorisation_bout_en_bout(tmp_path, monkeypatch):
     base = str(tmp_path / "compta.xlsx")
     fve.construire_excel([f], base, plan=plan)
     wb = load_workbook(base)
-    assert wb.sheetnames == ["Resume", "Details", "Plan comptable"]
+    assert wb.sheetnames == ["Resume", "Details", "Totaux par catégorie", "Plan comptable"]
     ws = wb["Resume"]
     col = [c.value for c in ws[1]].index("Catégorie") + 1
     assert ws.cell(2, col).value == "5320 · Location de véhicule"
@@ -84,6 +84,72 @@ def test_categorisation_bout_en_bout(tmp_path, monkeypatch):
     fve.construire_excel([f], base, base_excel=base, langue="en",
                          plan=fve.plan_du_classeur(base))
     wb = load_workbook(base)
-    assert wb.sheetnames == ["Summary", "Details", "Chart of accounts"]
+    assert wb.sheetnames == ["Summary", "Details", "Totals by category", "Chart of accounts"]
     dv = wb["Summary"].data_validations.dataValidation
     assert len(dv) == 1 and "'Chart of accounts'!" in dv[0].formula1
+
+
+def _piece(nom, numero, ht, tx, ttc, cat, lignes):
+    plan = fve.plan_par_defaut("fr")
+    brut = {"fournisseur": nom, "numero": numero, "date": "2026-09-01",
+            "devise": "CAD", "total_ht": ht, "tps": None, "tvq": None, "tva": tx,
+            "total_ttc": ttc, "compte": cat,
+            "lignes": [{"description": d, "montant": m, "compte": c}
+                       for d, m, c in lignes]}
+    return fve._vers_facture(nom + ".pdf", brut, "test", plan), plan
+
+
+def test_categorie_par_article_et_schema(monkeypatch):
+    f, _ = _piece("Costco", "C1", 100, 13, 113, "5240",
+                  [("Papier", 75, "5240"), ("Sandwich", 25, "5210")])
+    assert [l.categorie for l in f.lignes] == ["5240 · Fournitures de bureau",
+                                               "5210 · Repas et représentation"]
+    vu = {}
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "cle-test")
+    monkeypatch.setattr(fve, "_appeler_claude",
+                        lambda t, i, m, to, schema, consigne: vu.update(s=schema) or {})
+    fve.extraire_avec_llm(texte="x", plan=fve.plan_par_defaut("fr"))
+    article = vu["s"]["properties"]["lignes"]["items"]
+    assert "compte" in article["required"] and "5210" in article["properties"]["compte"]["enum"]
+
+
+def test_totaux_par_categorie_avec_repartition(tmp_path):
+    """Reçu mixte réparti au prorata des articles ; pièce simple entière ;
+    onglet recalculé à chaque ajout ; TOTAL identique au résumé."""
+    mixte, plan = _piece("Costco", "C1", 100, 13, 113, "5240",
+                         [("Papier", 75, "5240"), ("Sandwich", 25, "5210")])
+    simple, _ = _piece("Enterprise", "E1", 200, 26, 226, "5320",
+                       [("Location 2 jours", 200, "5320")])
+    base = str(tmp_path / "compta.xlsx")
+    fve.construire_excel([mixte], base, plan=plan)
+    fve.construire_excel([simple], base, base_excel=base, plan=plan)
+
+    wt = load_workbook(base)["Totaux par catégorie"]
+    lignes = {r[0]: r for r in wt.iter_rows(min_row=2, values_only=True)}
+    assert lignes["5240 · Fournitures de bureau"][2:] == (1, 75, 0, 0, 9.75, 84.75)
+    assert lignes["5210 · Repas et représentation"][2:] == (1, 25, 0, 0, 3.25, 28.25)
+    assert lignes["5320 · Location de véhicule"][2:] == (1, 200, 0, 0, 26, 226)
+    assert lignes["TOTAL CAD"][2:] == (2, 300, 0, 0, 39, 339)
+    assert len(lignes) == 4                      # pas de doublon après l'ajout
+
+
+def test_traitement_en_parallele_garde_l_ordre(monkeypatch):
+    import threading
+    import time
+    actifs, maxi = [0], [0]
+    verrou = threading.Lock()
+
+    def lent(chemin, **options):
+        with verrou:
+            actifs[0] += 1
+            maxi[0] = max(maxi[0], actifs[0])
+        time.sleep(0.05)
+        with verrou:
+            actifs[0] -= 1
+        if chemin == "mauvais":
+            raise fve.ErreurLLM("illisible")
+        return chemin.upper()
+    monkeypatch.setattr(fve, "traiter_facture", lent)
+    res = fve.traiter_lot(["a", "mauvais", "c", "d"], paralleles=4)
+    assert res[0] == "A" and isinstance(res[1], fve.ErreurLLM) and res[2:] == ["C", "D"]
+    assert maxi[0] > 1                           # vraiment en parallèle

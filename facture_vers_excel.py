@@ -77,6 +77,7 @@ class LigneFacture:
     quantite: Optional[float] = None
     prix_unitaire: Optional[float] = None
     montant: Optional[float] = None
+    categorie: str = ""      # compte du plan comptable de cet article
 
 
 @dataclass
@@ -295,6 +296,11 @@ def extraire_avec_llm(
             "type": "string", "enum": [_id_compte(c) for c in plan],
             "description": "Compte du plan comptable le plus adapté à la pièce"}
         schema["required"] = schema["required"] + ["compte"]
+        article = schema["properties"]["lignes"]["items"]
+        article["properties"]["compte"] = {
+            "type": "string", "enum": [_id_compte(c) for c in plan],
+            "description": "Compte du plan comptable de cet article"}
+        article["required"] = article["required"] + ["compte"]
         consigne = _consigne_plan(plan)
     if fournisseur == "claude":
         return _appeler_claude(texte, images, modele, timeout, schema, consigne)
@@ -492,7 +498,9 @@ def _vers_facture(chemin: str, brut: dict[str, Any], moteur: str,
         description=str(l.get("description", "")).strip(),
         quantite=_nombre(l.get("quantite")),
         prix_unitaire=_nombre(l.get("prix_unitaire")),
-        montant=_nombre(l.get("montant"))) for l in (brut.get("lignes") or [])]
+        montant=_nombre(l.get("montant")),
+        categorie=libelle_compte(plan, l.get("compte")))
+        for l in (brut.get("lignes") or [])]
     f = Facture(
         fichier=os.path.basename(chemin),
         fournisseur=str(brut.get("fournisseur", "")).strip(),
@@ -633,6 +641,23 @@ def traiter_facture(chemin, moteur="auto", fournisseur_llm="auto", modele=None,
     raise ErreurLLM(f"Type de fichier non pris en charge : {os.path.basename(chemin)}")
 
 
+def traiter_lot(chemins: list[str], paralleles: int = 4, **options) -> list:
+    """
+    Traite plusieurs fichiers en parallèle (le temps est surtout passé à
+    attendre l'API). Renvoie, dans l'ordre des chemins, une Facture ou
+    l'exception levée pour ce fichier : un fichier illisible ne bloque pas le lot.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def un(chemin):
+        try:
+            return traiter_facture(chemin, **options)
+        except Exception as e:      # noqa: BLE001 — rapporté par fichier
+            return e
+    with ThreadPoolExecutor(max_workers=max(1, paralleles)) as ex:
+        return list(ex.map(un, chemins))
+
+
 # =================================================================
 #  5 bis. PLAN COMPTABLE (catégorisation des pièces)
 # =================================================================
@@ -695,7 +720,10 @@ def _consigne_plan(plan: list[dict]) -> str:
     return ("\n\nCatégorise aussi la pièce : dans 'compte', donne l'identifiant "
             "du compte le plus adapté de ce plan comptable, d'après le fournisseur "
             "et les articles achetés (une facture d'achat va en général dans une "
-            "dépense ; un bien durable coûteux peut être un actif) :\n" + comptes)
+            "dépense ; un bien durable coûteux peut être un actif). Donne aussi "
+            "le 'compte' de CHAQUE ligne : sur un reçu mixte (ex. fournitures + "
+            "repas), chaque article garde son propre compte, et le 'compte' de la "
+            "pièce est celui du plus gros montant. Plan comptable :\n" + comptes)
 
 
 _TITRES_PLAN = {
@@ -820,7 +848,7 @@ _COLS_RESUME = ["Fichier", "Fournisseur", "N°", "Date", "Devise", "Total HT",
                 "TPS", "TVQ", "Taxes", "Total TTC", "Nb lignes",
                 "Regroupé avec", "Alertes", "Catégorie"]
 _COLS_DETAILS = ["Fichier", "Fournisseur", "N°", "Description", "Quantité",
-                 "Prix unitaire", "Montant"]
+                 "Prix unitaire", "Montant", "Catégorie"]
 _EN = {
     "Resume": "Summary", "Details": "Details",
     "Fichier": "File", "Fournisseur": "Vendor", "N°": "Invoice No.",
@@ -830,6 +858,7 @@ _EN = {
     "Description": "Description", "Quantité": "Quantity",
     "Prix unitaire": "Unit price", "Montant": "Amount",
     "Catégorie": "Category", "Plan comptable": "Chart of accounts",
+    "Totaux par catégorie": "Totals by category", "Nb factures": "Invoices",
     "Code": "Code", "Compte": "Account", "Type": "Type",
 }
 
@@ -846,6 +875,7 @@ _SYNONYMES = {
     "Alertes": ["alerts"],
     "Catégorie": ["categorie", "catégorie comptable", "compte comptable"],
     "Plan comptable": ["plan", "accounts", "coa"],
+    "Totaux par catégorie": ["totaux categories", "category totals"],
 }
 
 
@@ -1031,6 +1061,86 @@ def _liste_deroulante(ws, colonne: int, plan_ws, nb: int) -> None:
     ws.add_data_validation(dv)
 
 
+_SANS_CATEGORIE = {"fr": "(Sans catégorie)", "en": "(Uncategorized)"}
+
+
+def _repartition_categories(ws, pos_r, wd, pos_d, langue: str) -> list[dict]:
+    """
+    Montants par (catégorie, devise) de toutes les pièces du classeur.
+    Une pièce dont les articles relèvent de plusieurs catégories est répartie
+    au prorata du montant des articles (HT, taxes et TTC) ; sinon elle va
+    entière dans la catégorie de sa ligne de résumé (modifiable par le
+    comptable). Les taxes d'un reçu mixte sont donc réparties approximativement.
+    """
+    sans = _SANS_CATEGORIE.get(langue, _SANS_CATEGORIE["fr"])
+    champs = ("total_ht", "tps", "tvq", "taxes", "total_ttc")
+    articles: dict[tuple, list] = {}
+    for r in range(2, wd.max_row + 1):
+        cle = (wd.cell(row=r, column=pos_d["Fichier"]).value,
+               wd.cell(row=r, column=pos_d["N°"]).value)
+        m = wd.cell(row=r, column=pos_d["Montant"]).value
+        if isinstance(m, (int, float)):
+            articles.setdefault(cle, []).append(
+                (m, wd.cell(row=r, column=pos_d["Catégorie"]).value))
+
+    groupes: dict[tuple, dict] = {}
+    for r in range(2, ws.max_row + 1):
+        val = lambda cle: ws.cell(row=r, column=pos_r[cle]).value
+        if val("Fichier") is None or _est_ligne_total(val("Fichier")):
+            continue
+        cat_piece = val("Catégorie") or sans
+        devise = normaliser_devise(val("Devise"))
+        lignes = articles.get((val("Fichier"), val("N°")), [])
+        somme = sum(m for m, _ in lignes)
+        cats = {c for _, c in lignes if c}
+        if len(cats) >= 2 and somme > 0:
+            parts: dict[str, float] = {}
+            for m, c in lignes:
+                parts[c or cat_piece] = parts.get(c or cat_piece, 0) + m / somme
+        else:
+            parts = {cat_piece: 1.0}
+        for cat, part in parts.items():
+            g = groupes.setdefault((cat, devise), dict(
+                {"categorie": cat, "devise": devise, "nb": 0}, **{c: 0.0 for c in champs}))
+            g["nb"] += 1
+            for champ, cle in zip(champs, _COLS_MONTANTS):
+                v = val(cle)
+                if isinstance(v, (int, float)):
+                    g[champ] += v * part
+    res = sorted(groupes.values(), key=lambda g: (g["devise"], g["categorie"] == sans,
+                                                   g["categorie"]))
+    for g in res:
+        for c in champs:
+            g[c] = round(g[c], 2)
+    return res
+
+
+def _ecrire_totaux_categories(wb, ws, pos_r, wd, pos_d, langue: str) -> None:
+    """(Ré)écrit l'onglet « Totaux par catégorie » à partir de tout le classeur."""
+    for n in list(wb.sheetnames):
+        if n.strip().lower() in _noms_connus("Totaux par catégorie"):
+            wb.remove(wb[n])
+    cols = ["Catégorie", "Devise", "Nb factures"] + list(_COLS_MONTANTS)
+    wt = wb.create_sheet(_titre("Totaux par catégorie", langue))
+    wt.append([_titre(c, langue) for c in cols])
+    _entete(wt, len(cols))
+    groupes = _repartition_categories(ws, pos_r, wd, pos_d, langue)
+    champs = ("total_ht", "tps", "tvq", "taxes", "total_ttc")
+    for g in groupes:
+        wt.append([g["categorie"], g["devise"] or None, g["nb"]] + [g[c] for c in champs])
+    # Une ligne TOTAL par devise (les mêmes montants que le résumé).
+    mot = "invoice(s)" if langue == "en" else "facture(s)"
+    for t in _calculer_totaux(ws, pos_r):
+        wt.append([f"TOTAL {t['devise']}".strip(), t["devise"] or None, t["nb"]]
+                  + [t[c] for c in ("total_ht", "tps", "tvq", "taxes", "total_ttc")])
+        for cell in wt[wt.max_row]:
+            cell.font, cell.fill, cell.border = Font(bold=True), _FOND_TOTAL, _BORD
+    for row in wt.iter_rows(min_row=2, min_col=4, max_col=len(cols)):
+        for cell in row:
+            cell.number_format = _MON
+    _largeurs(wt)
+
+
 def construire_excel(factures: list[Facture], chemin_sortie: str,
                      base_excel: Optional[str] = None, langue: str = "fr",
                      plan: Optional[list[dict]] = None) -> str:
@@ -1077,10 +1187,13 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
     _ajouter_totaux(ws, pos_r, langue)
     _largeurs(ws)
 
+    _ecrire_totaux_categories(wb, ws, pos_r, wd, pos_d, langue)
+
     plan = plan or _plan_de_classeur(wb)
     if plan:
         plan_ws = _ecrire_plan(wb, plan, langue)
         _liste_deroulante(ws, pos_r["Catégorie"], plan_ws, len(plan))
+        _liste_deroulante(wd, pos_d["Catégorie"], plan_ws, len(plan))
 
     for f in factures:
         for l in f.lignes:
@@ -1088,7 +1201,7 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
                 "Fichier": f.fichier, "Fournisseur": f.fournisseur,
                 "N°": f.numero, "Description": l.description,
                 "Quantité": l.quantite, "Prix unitaire": l.prix_unitaire,
-                "Montant": l.montant})
+                "Montant": l.montant, "Catégorie": l.categorie or None})
             for cle in ("Prix unitaire", "Montant"):
                 wd.cell(row=r, column=pos_d[cle]).number_format = _MON
     _largeurs(wd)
@@ -1117,6 +1230,8 @@ def _parseur():
     p.add_argument("--plan", default=None, metavar="PLAN.xlsx|csv",
                    help="Plan comptable pour catégoriser les pièces "
                         "(défaut : celui du classeur --ajouter-a, sinon plan standard).")
+    p.add_argument("--paralleles", type=int, default=4,
+                   help="Nombre de fichiers lus en même temps (défaut 4).")
     p.add_argument("--langue", choices=["fr", "en"], default="fr",
                    help="Langue des titres de l'Excel (fr ou en).")
     p.add_argument("--json", action="store_true")
@@ -1130,18 +1245,20 @@ def main(argv=None):
     if not plan and getattr(args, "ajouter_a", None) and os.path.isfile(args.ajouter_a):
         plan = plan_du_classeur(args.ajouter_a)
     plan = plan or plan_par_defaut(args.langue)
+    chemins = []
     for chemin in args.fichiers:
         if not os.path.isfile(chemin):
             print(f"  ✗ Introuvable : {chemin}", file=sys.stderr)
-            continue
-        print(f"  → {os.path.basename(chemin)} [{_type_source(chemin)}] ...",
-              file=sys.stderr)
-        try:
-            f = traiter_facture(chemin, moteur=args.moteur,
-                                fournisseur_llm=args.fournisseur, modele=args.modele,
-                                plan=plan)
-        except ErreurLLM as e:
-            print(f"  ✗ {e}", file=sys.stderr)
+        else:
+            chemins.append(chemin)
+    print(f"  → {len(chemins)} fichier(s), {args.paralleles} en parallèle ...",
+          file=sys.stderr)
+    resultats = traiter_lot(chemins, paralleles=args.paralleles, moteur=args.moteur,
+                            fournisseur_llm=args.fournisseur, modele=args.modele,
+                            plan=plan)
+    for chemin, f in zip(chemins, resultats):
+        if isinstance(f, Exception):
+            print(f"  ✗ {os.path.basename(chemin)} : {f}", file=sys.stderr)
             continue
         factures.append(f)
         etat = "⚠ " + " | ".join(f.alertes) if f.alertes else "ok"

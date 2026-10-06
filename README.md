@@ -23,6 +23,7 @@ continuous deployment on Render.
 
 ## Features
 
+- **Batch processing** — drop many invoices at once; they are read in parallel.
 - **Photos AND PDFs** — `.jpg .png .heic/.heif .webp` and PDF. Photos and scanned
   PDFs go through a vision model; text PDFs are extracted directly. No manual
   conversion needed.
@@ -35,7 +36,11 @@ continuous deployment on Render.
 - **Chart of accounts** — each invoice is categorized against your own chart of
   accounts (Excel/CSV import) or a standard Canadian small-business chart; a
   *Category* column with a dropdown lets the accountant review and filter, and
-  the chart is saved in the workbook for the next appends.
+  the chart is saved in the workbook for the next appends. Each line item is
+  categorized too, so mixed receipts (supplies + meals) are split correctly.
+- **Totals by category** — a dedicated sheet sums every invoice per account and
+  currency (mixed receipts allocated pro rata to their items), rebuilt on every
+  append.
 - **Running totals** — a TOTAL row per currency at the bottom of the summary
   (invoice count, subtotal, GST, QST, tax, total), recalculated on every append;
   the web app also shows the cumulative file total.
@@ -98,7 +103,8 @@ The API key is provided through an environment variable (`ANTHROPIC_API_KEY` or
 
 To protect the API budget of a public demo, a daily quota applies:
 `QUOTA_JOUR_TOTAL` (default 30 files/day) and `QUOTA_JOUR_VISITEUR` (default
-10 files/day per IP address).
+10 files/day per IP address). Files are read in parallel
+(`FACTURO_PARALLELE`, default 4).
 
 ## License
 

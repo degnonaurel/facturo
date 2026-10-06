@@ -23,6 +23,8 @@ pytest · Docker · déploiement continu sur Render.
 
 ## Fonctionnalités
 
+- **Traitement par lot** — déposez plusieurs factures d'un coup ; elles sont lues
+  en parallèle.
 - **Photos ET PDF** — `.jpg .png .heic/.heif .webp` et PDF. Les photos et les
   PDF scannés passent par un modèle de vision ; les PDF texte par extraction
   directe. Aucune conversion manuelle nécessaire.
@@ -35,7 +37,12 @@ pytest · Docker · déploiement continu sur Render.
 - **Plan comptable** — chaque facture est catégorisée selon votre plan comptable
   (import Excel/CSV) ou un plan standard de PME canadienne ; une colonne
   *Catégorie* avec liste déroulante permet au comptable de vérifier et filtrer,
-  et le plan est enregistré dans le classeur pour les ajouts suivants.
+  et le plan est enregistré dans le classeur pour les ajouts suivants. Chaque
+  article est aussi catégorisé : un reçu mixte (fournitures + repas) est
+  ventilé correctement.
+- **Totaux par catégorie** — un onglet dédié additionne toutes les factures par
+  compte et par devise (reçus mixtes répartis au prorata des articles),
+  recalculé à chaque ajout.
 - **Totaux cumulés** — une ligne TOTAL par devise en bas du résumé (nombre de
   factures, HT, TPS, TVQ, taxes, TTC), recalculée à chaque ajout ; l'app web
   affiche aussi le total cumulé du fichier.
@@ -97,7 +104,8 @@ plateforme — jamais dans le code.
 
 Pour protéger le crédit API d'une démo publique, un quota journalier est
 appliqué : `QUOTA_JOUR_TOTAL` (défaut 30 fichiers/jour) et
-`QUOTA_JOUR_VISITEUR` (défaut 10 fichiers/jour par adresse IP).
+`QUOTA_JOUR_VISITEUR` (défaut 10 fichiers/jour par adresse IP). Les fichiers sont lus en
+parallèle (`FACTURO_PARALLELE`, défaut 4).
 
 ## Licence
 

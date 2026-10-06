@@ -31,6 +31,7 @@ from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from starlette.concurrency import run_in_threadpool
 
 import facture_vers_excel as fve
 
@@ -48,6 +49,8 @@ def _pret() -> bool:
 # (fichiers traités par jour), remis à zéro chaque jour et au redémarrage.
 QUOTA_JOUR_TOTAL = int(os.getenv("QUOTA_JOUR_TOTAL", "30"))
 QUOTA_JOUR_VISITEUR = int(os.getenv("QUOTA_JOUR_VISITEUR", "10"))
+# Fichiers lus en même temps (appels API en parallèle).
+PARALLELES = int(os.getenv("FACTURO_PARALLELE", "4"))
 _FUSEAU = timezone(timedelta(hours=-5))   # heure normale de l'Est (Ottawa)
 _quota = {"jour": None, "total": 0, "visiteurs": {}}
 _verrou_quota = threading.Lock()
@@ -122,19 +125,25 @@ async def extraire(request: Request,
                 pass
         plan_comptable = plan_comptable or fve.plan_par_defaut(langue)
 
+        chemins = []
         for up in fichiers:
             ext = os.path.splitext(up.filename or "")[1] or ".bin"
             dest = os.path.join(tmp, f"{uuid.uuid4().hex}{ext}")
             with open(dest, "wb") as f:
                 f.write(await up.read())
-            try:
-                fac = fve.traiter_facture(dest, plan=plan_comptable)
-                fac.fichier = up.filename or fac.fichier
-                factures.append(fac)
-            except fve.ErreurLLM as e:
-                erreurs.append({"fichier": up.filename, "message": str(e)})
-            except Exception as e:
-                erreurs.append({"fichier": up.filename, "message": f"Erreur : {e}"})
+            chemins.append(dest)
+
+        # Lecture en parallèle, hors de la boucle d'événements du serveur.
+        resultats = await run_in_threadpool(
+            fve.traiter_lot, chemins, paralleles=PARALLELES, plan=plan_comptable)
+        for up, res in zip(fichiers, resultats):
+            if isinstance(res, fve.ErreurLLM):
+                erreurs.append({"fichier": up.filename, "message": str(res)})
+            elif isinstance(res, Exception):
+                erreurs.append({"fichier": up.filename, "message": f"Erreur : {res}"})
+            else:
+                res.fichier = up.filename or res.fichier
+                factures.append(res)
 
         if not factures:
             return JSONResponse({"factures": [], "erreurs": erreurs,
