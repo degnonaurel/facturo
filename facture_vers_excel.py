@@ -258,7 +258,10 @@ _INSTRUCTION = (
     "5) Extrais chaque ligne (description, quantité, prix unitaire, montant). "
     "Une ligne '3 @ 4.95' = quantité 3, prix unitaire 4.95, montant 14.85. "
     "6) N'invente aucune ligne ; si pas de détail, renvoie une liste vide. "
-    "7) Ne mets jamais un numéro de carte ou de compte comme numéro de facture."
+    "7) Ne mets jamais un numéro de carte ou de compte comme numéro de facture. "
+    "8) Devise = code ISO (CAD, USD, EUR...). Un « $ » sans mention explicite "
+    "« USD », « US$ » ou « US » = CAD : la clientèle est canadienne, et des taxes "
+    "TPS/TVQ/TVH (5 %, 13 %, 14,975 %...) confirment le CAD."
 )
 
 _PROMPT_TXT = ("Voici le texte de la facture. Extrais les données structurées.\n\n"
