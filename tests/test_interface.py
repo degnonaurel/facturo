@@ -90,3 +90,17 @@ def test_totaux_fichier_renvoyes(tmp_path):
         files = [("fichiers", ("f.pdf", fh.read(), "application/pdf"))]
     d = client.post("/api/extraire", files=files).json()
     assert d["totaux_fichier"] and d["totaux_fichier"][0]["nb"] == 1
+
+
+def test_statut_quota_et_contact(tmp_path, monkeypatch):
+    monkeypatch.setattr(interface_web, "_quota", {"jour": None, "total": 0, "visiteurs": {}})
+    s = client.get("/api/statut", headers={"X-Forwarded-For": "9.9.9.9"}).json()
+    assert s["quota"] == interface_web.QUOTA_JOUR_VISITEUR
+    assert s["restant"] == interface_web.QUOTA_JOUR_VISITEUR and "@" in s["contact"]
+    pdf = pdf_facture_demo(str(tmp_path / "f.pdf"))
+    with open(pdf, "rb") as fh:
+        files = [("fichiers", ("f.pdf", fh.read(), "application/pdf"))]
+    d = client.post("/api/extraire", files=files, headers={"X-Forwarded-For": "9.9.9.9"}).json()
+    assert d["restant"] == interface_web.QUOTA_JOUR_VISITEUR - 1
+    page = client.get("/").text
+    assert 'id="offre"' in page and "Facturo Pro" in page

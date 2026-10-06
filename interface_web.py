@@ -51,6 +51,8 @@ QUOTA_JOUR_TOTAL = int(os.getenv("QUOTA_JOUR_TOTAL", "30"))
 QUOTA_JOUR_VISITEUR = int(os.getenv("QUOTA_JOUR_VISITEUR", "10"))
 # Fichiers lus en même temps (appels API en parallèle).
 PARALLELES = int(os.getenv("FACTURO_PARALLELE", "4"))
+# Adresse de contact pour la version sur mesure (Facturo Pro).
+CONTACT = os.getenv("FACTURO_CONTACT", "degnonaurel@gmail.com")
 _FUSEAU = timezone(timedelta(hours=-5))   # heure normale de l'Est (Ottawa)
 _quota = {"jour": None, "total": 0, "visiteurs": {}}
 _verrou_quota = threading.Lock()
@@ -62,6 +64,16 @@ def _visiteur(request: Request) -> str:
     if xff:
         return xff.split(",")[0].strip()
     return request.client.host if request.client else "inconnu"
+
+
+def _restant(visiteur: str) -> int:
+    """Fichiers encore autorisés aujourd'hui pour ce visiteur."""
+    jour = datetime.now(_FUSEAU).date()
+    with _verrou_quota:
+        if _quota["jour"] != jour:
+            return min(QUOTA_JOUR_VISITEUR, QUOTA_JOUR_TOTAL)
+        return max(0, min(QUOTA_JOUR_VISITEUR - _quota["visiteurs"].get(visiteur, 0),
+                          QUOTA_JOUR_TOTAL - _quota["total"]))
 
 
 def _reserver_quota(visiteur: str, n: int) -> bool:
@@ -80,9 +92,10 @@ def _reserver_quota(visiteur: str, n: int) -> bool:
 
 
 @app.get("/api/statut")
-def statut():
+def statut(request: Request):
     # On n'expose jamais le nom du moteur : seulement l'état de service.
-    return {"pret": _pret()}
+    return {"pret": _pret(), "quota": QUOTA_JOUR_VISITEUR,
+            "restant": _restant(_visiteur(request)), "contact": CONTACT}
 
 
 @app.post("/api/extraire")
@@ -177,7 +190,8 @@ async def extraire(request: Request,
         "alertes": [fve.traduire_alerte(a, langue) for a in f.alertes],
     } for f in factures]
     return {"factures": resume, "erreurs": erreurs, "download_id": jeton,
-            "ajoute": bool(base_path), "totaux_fichier": totaux}
+            "ajoute": bool(base_path), "totaux_fichier": totaux,
+            "restant": _restant(_visiteur(request))}
 
 
 @app.get("/telecharger/{jeton}")
@@ -286,6 +300,17 @@ _PAGE = r"""<!DOCTYPE html>
         animation:t .8s linear infinite;display:inline-block;vertical-align:middle}
   @keyframes t{to{transform:rotate(360deg)}}
   .etat{color:var(--muted);font-size:.92rem}
+  .quota-note{margin-top:10px;color:var(--muted);font-size:.84rem}
+  .quota-note b{color:var(--ink)}
+  .quota-note a,.err a{color:var(--pri);font-weight:600}
+  .offre{margin-top:22px;padding:22px 24px;display:flex;gap:20px;align-items:center;flex-wrap:wrap;
+    justify-content:space-between;border-left:4px solid var(--acc)}
+  .offre>div{flex:1 1 260px;min-width:0}
+  .offre h3{margin:4px 0 6px;font-family:'Space Grotesk',sans-serif;font-size:1.15rem}
+  .offre p{margin:0;color:var(--muted);font-size:.92rem;line-height:1.55}
+  .offre-tag{display:inline-block;font-size:.72rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--acc);background:var(--acc-doux);padding:3px 9px;border-radius:999px}
+  .offre-btn{text-decoration:none;white-space:nowrap}
   .etapes{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:22px 0 0}
   .etape{display:flex;gap:11px;align-items:flex-start;font-size:.9rem}
   .etape .n{flex:0 0 26px;height:26px;border-radius:8px;background:var(--acc-doux);color:var(--acc);
@@ -374,6 +399,7 @@ _PAGE = r"""<!DOCTYPE html>
         <button id="btn" class="btn pri" disabled data-i18n="btn">Convertir en Excel</button>
         <span id="etat" class="etat"></span>
       </div>
+      <div id="quotaNote" class="quota-note masque"></div>
       <div id="erreurs" class="err"></div>
 
       <div class="etapes">
@@ -393,6 +419,15 @@ _PAGE = r"""<!DOCTYPE html>
         <div id="cumul" class="cumul masque"></div>
       </div>
     </div>
+
+    <div id="offre" class="carte offre">
+      <div>
+        <div class="offre-tag" data-i18n="offre_tag">Facturo Pro</div>
+        <h3 data-i18n="offre_titre">Une version sur mesure pour votre entreprise</h3>
+        <p data-i18n="offre_texte">Plus de volume, votre plan comptable et vos fichiers Excel existants, un format adapté à votre logiciel comptable, un accès privé pour votre équipe. Conçu et accompagné par un consultant bilingue basé à Ottawa.</p>
+      </div>
+      <a id="offreLien" class="btn pri offre-btn" href="#" data-i18n="offre_btn">Discuter de mon besoin</a>
+    </div>
   </div>
 
   <div class="pied"><span data-i18n="pied">Facturo — vos données ne servent qu'à produire votre tableur.</span></div>
@@ -405,13 +440,19 @@ const I18N = {
     drop_gros:"Glissez vos fichiers ici", drop_petit:"ou cliquez pour choisir — photos (JPG, PNG, HEIC…) et PDF, plusieurs à la fois",
     btn:"Convertir en Excel", traitement:"Lecture en cours…",
     e1t:"Déposez", e1d:"Photo ou PDF, en lot.", e2t:"On lit tout", e2d:"Fournisseur, dates, taxes, lignes.",
-    e3t:"Téléchargez", e3d:"Un Excel propre, deux feuilles.",
+    e3t:"Téléchargez", e3d:"Un Excel propre, prêt pour la compta.",
     base_btn:"Ajouter à un Excel existant", base_hint:"optionnel — les nouvelles lignes s'ajoutent à la fin de votre fichier",
     base_choisi:"Excel de base :", ajoute_note:"Nouvelles lignes ajoutées à votre fichier.",
     res:"Résultat", tel:"Télécharger l'Excel", pied:"Facturo — vos données ne servent qu'à produire votre tableur.",
     th_f:"Fournisseur", th_n:"N°", th_d:"Date", th_ht:"HT", th_tps:"TPS", th_tvq:"TVQ", th_tx:"Taxes", th_ttc:"TTC", th_l:"Lignes",
     regroupe:"regroupé avec", pieces:"pièce(s)", aucune:"Aucune donnée n'a pu être extraite.", reseau:"Erreur réseau : ",
     quota:"Limite de la démo atteinte pour aujourd'hui. Revenez demain !",
+    gratuit:"Version gratuite", par_jour:"fichiers par jour", restants:"restant(s) aujourd'hui",
+    plus:"Besoin de plus ?", voir_pro:"Découvrir Facturo Pro",
+    offre_tag:"Facturo Pro", offre_titre:"Une version sur mesure pour votre entreprise",
+    offre_texte:"Plus de volume, votre plan comptable et vos fichiers Excel existants, un format adapté à votre logiciel comptable, un accès privé pour votre équipe. Conçu et accompagné par un consultant bilingue basé à Ottawa.",
+    offre_btn:"Discuter de mon besoin", mail_sujet:"Facturo Pro — demande d'information",
+    mail_corps:"Bonjour,\n\nJ'ai essayé Facturo et j'aimerais en savoir plus sur une version adaptée à mon entreprise.\n\nEntreprise :\nVolume approximatif (factures par mois) :\nLogiciel comptable utilisé :\n\nMerci !",
     plan_btn:"Importer mon plan comptable", plan_hint:"optionnel — Excel ou CSV ; sinon un plan standard est utilisé pour catégoriser",
     plan_choisi:"Plan comptable :", th_cat:"Catégorie",
     cumul:"Total du fichier", dont_taxes:"dont taxes", nb_fact:"facture(s) depuis le début" },
@@ -421,13 +462,19 @@ const I18N = {
     drop_gros:"Drag your files here", drop_petit:"or click to choose — photos (JPG, PNG, HEIC…) and PDF, several at once",
     btn:"Convert to Excel", traitement:"Reading…",
     e1t:"Drop", e1d:"Photo or PDF, in batches.", e2t:"We read it all", e2d:"Vendor, dates, taxes, line items.",
-    e3t:"Download", e3d:"A clean Excel, two sheets.",
+    e3t:"Download", e3d:"A clean Excel, ready for your books.",
     base_btn:"Add to an existing Excel", base_hint:"optional — new rows are appended to the end of your file",
     base_choisi:"Base Excel:", ajoute_note:"New rows appended to your file.",
     res:"Result", tel:"Download the Excel", pied:"Facturo — your data is only used to produce your spreadsheet.",
     th_f:"Vendor", th_n:"No.", th_d:"Date", th_ht:"Net", th_tps:"GST", th_tvq:"QST", th_tx:"Tax", th_ttc:"Total", th_l:"Items",
     regroupe:"merged with", pieces:"item(s)", aucune:"No data could be extracted.", reseau:"Network error: ",
     quota:"Today's demo limit has been reached. Please come back tomorrow!",
+    gratuit:"Free version", par_jour:"files per day", restants:"left today",
+    plus:"Need more?", voir_pro:"Discover Facturo Pro",
+    offre_tag:"Facturo Pro", offre_titre:"A custom version for your business",
+    offre_texte:"More volume, your chart of accounts and existing Excel files, output tailored to your accounting software, private access for your team. Built and supported by a bilingual consultant based in Ottawa.",
+    offre_btn:"Discuss my needs", mail_sujet:"Facturo Pro — information request",
+    mail_corps:"Hello,\n\nI tried Facturo and would like to learn more about a version tailored to my business.\n\nCompany:\nApproximate volume (invoices per month):\nAccounting software used:\n\nThank you!",
     plan_btn:"Import my chart of accounts", plan_hint:"optional — Excel or CSV; otherwise a standard chart is used to categorize",
     plan_choisi:"Chart of accounts:", th_cat:"Category",
     cumul:"File total", dont_taxes:"incl. tax", nb_fact:"invoice(s) since the start" }
@@ -443,7 +490,7 @@ function setLang(l){
   document.getElementById('fr').classList.toggle('actif',l==='fr');
   document.getElementById('en').classList.toggle('actif',l==='en');
   document.querySelectorAll('[data-i18n]').forEach(e=>{const k=e.getAttribute('data-i18n');if(I18N[l][k])e.textContent=I18N[l][k];});
-  majStatut(); rendreBase(); rendrePlan(); if(dernier) afficher(dernier);
+  majStatut(); rendreBase(); rendrePlan(); if(typeof majOffre==='function') majOffre(); if(dernier) afficher(dernier);
 }
 
 const input=document.getElementById('input'), zone=document.getElementById('zone'),
@@ -459,7 +506,17 @@ function majStatut(){
   else if(statutPret){t.textContent=T('statut_on');p.className='pastille on';}
   else{t.textContent=T('statut_off');p.className='pastille off';}
 }
-fetch('/api/statut').then(r=>r.json()).then(s=>{statutPret=!!s.pret;majStatut();}).catch(()=>{statutPret=false;majStatut();});
+let quota=null, restant=null, contact='';
+fetch('/api/statut').then(r=>r.json()).then(s=>{statutPret=!!s.pret;quota=s.quota;restant=s.restant;contact=s.contact||'';majStatut();majOffre();}).catch(()=>{statutPret=false;majStatut();});
+function majOffre(){
+  const q=document.getElementById('quotaNote');
+  if(quota!==null&&quota!==undefined){
+    q.classList.remove('masque');
+    q.innerHTML=`${T('gratuit')} · ${quota} ${T('par_jour')} · <b>${restant}</b> ${T('restants')} · ${T('plus')} <a href="#offre">${T('voir_pro')}</a>`;
+  }
+  const l=document.getElementById('offreLien');
+  if(contact) l.href=`mailto:${contact}?subject=${encodeURIComponent(T('mail_sujet'))}&body=${encodeURIComponent(T('mail_corps'))}`;
+}
 
 zone.onclick=()=>input.click();
 ['dragover','dragenter'].forEach(e=>zone.addEventListener(e,ev=>{ev.preventDefault();zone.classList.add('survol')}));
@@ -510,8 +567,9 @@ btn.onclick=async()=>{
   fd.append('langue',LANG);
   try{
     const r=await fetch('/api/extraire',{method:'POST',body:fd});
-    if(r.status===429){dernier=null;errBox.textContent=T('quota');}
-    else{dernier=await r.json(); afficher(dernier);}
+    if(r.status===429){dernier=null;restant=0;majOffre();
+      errBox.innerHTML=`${T('quota')} <a href="#offre">${T('voir_pro')} →</a>`;}
+    else{dernier=await r.json(); if(dernier.restant!==undefined){restant=dernier.restant;majOffre();} afficher(dernier);}
   }catch(e){errBox.textContent=T('reseau')+e;}
   etat.textContent=''; btn.disabled=false;
 };
