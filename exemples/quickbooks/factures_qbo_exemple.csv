@@ -1,0 +1,9 @@
+Bill no.,Supplier,Bill Date,Due Date,Memo,Account,Line Description,Line Amount,Line Tax Code,Line Tax Amount,Currency Code
+PG-1042,Papeterie Gatineau,03/09/2026,03/09/2026,papeterie_gatineau.jpg,Office supplies,Printer paper (10 reams),80.00,GST/QST QC - 9.975,11.98,CAD
+PG-1042,Papeterie Gatineau,03/09/2026,03/09/2026,papeterie_gatineau.jpg,Office supplies,Toner cartridge,40.00,GST/QST QC - 9.975,5.99,CAD
+BR-778,Bistro du Ruisseau,05/09/2026,05/09/2026,resto_hull.jpg,Meals and entertainment,,64.00,GST/QST QC - 9.975,9.58,CAD
+RH-2291,Rideau Hardware,08/09/2026,08/09/2026,quincaillerie_ottawa.pdf,Repairs and maintenance,Shelving brackets,150.00,HST ON,19.50,CAD
+RH-2291,Rideau Hardware,08/09/2026,08/09/2026,quincaillerie_ottawa.pdf,Meals and entertainment,Work lunch for crew,100.00,HST ON,13.00,CAD
+FPA-55,Formation Pro Alberta,10/09/2026,10/09/2026,cours_en_ligne.pdf,Training,,300.00,GST,15.00,CAD
+LOY-2026-09,Gestion Immobilière Hull,01/09/2026,01/09/2026,loyer_septembre.pdf,Rent,,900.00,Exempt,0.00,CAD
+CN-88412,CloudNote Inc.,12/09/2026,12/09/2026,logiciel_us.pdf,Software and subscriptions,,29.00,Out of Scope,,USD

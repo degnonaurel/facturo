@@ -23,6 +23,8 @@ continuous deployment on Render.
 
 ## Features
 
+### Everyday use
+
 - **Batch processing** — drop many invoices at once; they are read in parallel.
 - **Photos AND PDFs** — `.jpg .png .heic/.heif .webp` and PDF. Photos and scanned
   PDFs go through a vision model; text PDFs are extracted directly. No manual
@@ -31,6 +33,19 @@ continuous deployment on Render.
 - **Canadian sales taxes** — GST/TPS and QST/TVQ broken out separately; HST and
   GST+PST handled in the tax total.
 - **Grouping** of documents from the same purchase (itemized receipt + payment slip).
+- **Consistency checks** (net + taxes ≈ total, sum of lines ≈ net) flagged in an
+  *Warnings* column (*Alertes* in French).
+- **Bilingual** — interface and documents in English and French; the Excel file
+  (sheet names, column titles, warnings) follows the language you work in, and
+  an existing file is recognized in either language.
+
+### For accountants
+
+Categories and totals are always in the Excel, on sheets after the summary, so
+everyday users can ignore them. Importing a chart of accounts, appending to an
+existing file and the QuickBooks export sit in the collapsed *Options for
+accountants* panel of the web app.
+
 - **Append to an existing Excel file** — new rows are added at the end, nothing
   is overwritten: keep your books up to date as you go.
 - **Chart of accounts** — each invoice is categorized against your own chart of
@@ -44,18 +59,15 @@ continuous deployment on Render.
 - **Running totals** — a TOTAL row per currency at the bottom of the summary
   (invoice count, subtotal, GST, QST, tax, total), recalculated on every append;
   the web app also shows the cumulative file total.
-- **QuickBooks Online export** — alongside the Excel file, a CSV in the
-  QuickBooks Online Canada bill import format (*Settings › Import data › Bills*):
-  one row per line item, account names from your chart of accounts (import the
-  chart exported from QuickBooks), amounts before tax, and the matching
-  Canadian tax code (`GST`, `HST ON`, `GST/QST QC - 9.975`, `Exempt`,
-  `Out of Scope`). Choose *Exclusive* tax and the DD/MM/YYYY date format when
-  importing.
-- **Consistency checks** (net + taxes ≈ total, sum of lines ≈ net) flagged in an
-  *Warnings* column (*Alertes* in French).
-- **Bilingual** — interface and documents in English and French; the Excel file
-  (sheet names, column titles, warnings) follows the language you work in, and
-  an existing file is recognized in either language.
+- **QuickBooks Online export** (opt-in) — tick *Also prepare a QuickBooks Online
+  import file* (or `--qbo` on the command line) to get, **in addition to** the
+  unchanged Excel file, a CSV in the QuickBooks Online Canada bill import format
+  (*Settings › Import data › Bills*): one row per line item, account names from
+  your chart of accounts (import the chart exported from QuickBooks), amounts
+  before tax, and the matching Canadian tax code (`GST`, `HST ON`,
+  `GST/QST QC - 9.975`, `Exempt`, `Out of Scope`) — no more re-keying receipts.
+  Only the invoices of the current batch are included, so appending never
+  creates duplicates. Test kit: [`exemples/quickbooks/`](exemples/quickbooks/).
 
 ## Quick start
 

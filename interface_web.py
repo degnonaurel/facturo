@@ -103,8 +103,10 @@ async def extraire(request: Request,
                    fichiers: list[UploadFile] = File(...),
                    base: Optional[UploadFile] = File(None),
                    plan: Optional[UploadFile] = File(None),
-                   langue: str = Form("fr")):
+                   langue: str = Form("fr"),
+                   qbo: str = Form("")):
     langue = "en" if langue == "en" else "fr"
+    veut_qbo = qbo in ("1", "true", "on")
     if not _reserver_quota(_visiteur(request), len(fichiers)):
         return JSONResponse({"quota_atteint": True}, status_code=429)
     factures, erreurs = [], []
@@ -176,12 +178,17 @@ async def extraire(request: Request,
                                         f"Excel existant illisible, nouveau fichier créé ({e})")})
             fve.construire_excel(factures, chemin, langue=langue, plan=plan_comptable)
         _TELECHARGEMENTS[jeton] = chemin
-        # CSV QuickBooks Online : seulement les pièces de cet envoi (pas de doublon
-        # à l'import quand on ajoute à un Excel existant).
-        try:
-            fve.construire_csv_qbo(factures, chemin[:-5] + "_qbo.csv", plan=plan_comptable)
-        except Exception as e:
-            erreurs.append({"fichier": "QuickBooks", "message": str(e)})
+        # CSV QuickBooks Online, en option et en plus de l'Excel (jamais à sa
+        # place) : seulement les pièces de cet envoi, pour ne pas importer de
+        # doublons quand on ajoute à un Excel existant.
+        qbo_pret = False
+        if veut_qbo:
+            try:
+                fve.construire_csv_qbo(factures, chemin[:-5] + "_qbo.csv",
+                                       plan=plan_comptable)
+                qbo_pret = True
+            except Exception as e:
+                erreurs.append({"fichier": "QuickBooks", "message": str(e)})
         try:
             totaux = fve.totaux_resume(chemin)
         except Exception:
@@ -196,7 +203,7 @@ async def extraire(request: Request,
         "alertes": [fve.traduire_alerte(a, langue) for a in f.alertes],
     } for f in factures]
     return {"factures": resume, "erreurs": erreurs, "download_id": jeton,
-            "ajoute": bool(base_path), "totaux_fichier": totaux,
+            "ajoute": bool(base_path), "totaux_fichier": totaux, "qbo": qbo_pret,
             "restant": _restant(_visiteur(request))}
 
 
@@ -289,6 +296,15 @@ _PAGE = r"""<!DOCTYPE html>
   ul.fichiers .ico{width:22px;text-align:center}
   ul.fichiers .x{margin-left:auto;color:var(--muted);cursor:pointer;font-weight:700;padding:2px 6px;border-radius:6px}
   ul.fichiers .x:hover{background:var(--acc-doux);color:var(--acc)}
+  .avance{margin-top:16px;border-top:1px solid var(--bord);padding-top:12px}
+  .avance summary{cursor:pointer;font-weight:600;font-size:.92rem;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+  .avance summary .base-hint{font-weight:400}
+  .avance summary::before{content:"▸";color:var(--pri)}
+  .avance[open] summary::before{content:"▾"}
+  .avance summary::-webkit-details-marker{display:none}
+  .avance summary{list-style:none}
+  .coche{margin-top:14px;display:flex;gap:10px;align-items:flex-start;font-size:.9rem;cursor:pointer}
+  .coche input{margin-top:4px;accent-color:var(--pri)}
   .base-zone{margin-top:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
   .base-btn{display:inline-flex;align-items:center;gap:6px;border:1px dashed var(--bord);border-radius:10px;
             padding:9px 14px;cursor:pointer;font-size:.88rem;font-weight:600;color:var(--pri);background:transparent}
@@ -394,6 +410,9 @@ _PAGE = r"""<!DOCTYPE html>
       </div>
       <ul id="liste" class="fichiers"></ul>
 
+      <details id="avance" class="avance">
+        <summary><span data-i18n="av_titre">Options pour comptables</span>
+          <span class="base-hint" data-i18n="av_hint">plan comptable, ajout à un Excel existant, export QuickBooks — facultatif</span></summary>
       <div class="base-zone">
         <label class="base-btn">
           <input id="baseInput" type="file" accept=".xlsx" class="masque">
@@ -410,6 +429,12 @@ _PAGE = r"""<!DOCTYPE html>
         <span class="base-hint" data-i18n="plan_hint">optionnel — Excel ou CSV ; sinon un plan standard est utilisé pour catégoriser</span>
         <div id="planNom" class="base-nom masque"></div>
       </div>
+      <label class="coche">
+        <input id="qboInput" type="checkbox">
+        <span><b data-i18n="qbo_coche">Préparer aussi un fichier d'import QuickBooks Online</b><br>
+        <span class="base-hint" data-i18n="qbo_hint">CSV de factures fournisseurs, en plus de l'Excel — pour ne plus ressaisir vos pièces à la main</span></span>
+      </label>
+      </details>
 
       <div class="actions">
         <button id="btn" class="btn pri" disabled data-i18n="btn">Convertir en Excel</button>
@@ -431,7 +456,7 @@ _PAGE = r"""<!DOCTYPE html>
           <div><h2 id="titreRes" data-i18n="res">Résultat</h2><span id="ajouteNote" class="lie"></span></div>
           <div class="tels">
             <a id="tel" class="tel" href="#"><span>⬇</span><span data-i18n="tel">Télécharger l'Excel</span></a>
-            <a id="telQbo" class="tel2" href="#" title=""><span>⬇</span><span data-i18n="tel_qbo">CSV QuickBooks Online</span></a>
+            <a id="telQbo" class="tel2 masque" href="#" title=""><span>⬇</span><span data-i18n="tel_qbo">CSV QuickBooks Online</span></a>
           </div>
         </div>
         <div style="overflow-x:auto"><table id="tab"></table></div>
@@ -462,6 +487,9 @@ const I18N = {
     e3t:"Téléchargez", e3d:"Un Excel propre, prêt pour la compta.",
     base_btn:"Ajouter à un Excel existant", base_hint:"optionnel — les nouvelles lignes s'ajoutent à la fin de votre fichier",
     base_choisi:"Excel de base :", ajoute_note:"Nouvelles lignes ajoutées à votre fichier.",
+    av_titre:"Options pour comptables", av_hint:"plan comptable, ajout à un Excel existant, export QuickBooks — facultatif",
+    qbo_coche:"Préparer aussi un fichier d'import QuickBooks Online",
+    qbo_hint:"CSV de factures fournisseurs, en plus de l'Excel — pour ne plus ressaisir vos pièces à la main",
     res:"Résultat", tel:"Télécharger l'Excel", tel_qbo:"CSV QuickBooks Online",
     qbo_aide:"Factures fournisseurs à importer dans QuickBooks Online (Paramètres > Importer des données > Factures) : montants hors taxes, dates JJ/MM/AAAA.", pied:"Facturo — vos données ne servent qu'à produire votre tableur.",
     th_f:"Fournisseur", th_n:"N°", th_d:"Date", th_ht:"HT", th_tps:"TPS", th_tvq:"TVQ", th_tx:"Taxes", th_ttc:"TTC", th_l:"Lignes",
@@ -485,6 +513,9 @@ const I18N = {
     e3t:"Download", e3d:"A clean Excel, ready for your books.",
     base_btn:"Add to an existing Excel", base_hint:"optional — new rows are appended to the end of your file",
     base_choisi:"Base Excel:", ajoute_note:"New rows appended to your file.",
+    av_titre:"Options for accountants", av_hint:"chart of accounts, append to an existing Excel, QuickBooks export — optional",
+    qbo_coche:"Also prepare a QuickBooks Online import file",
+    qbo_hint:"Bills CSV, in addition to the Excel — no more re-keying your receipts by hand",
     res:"Result", tel:"Download the Excel", tel_qbo:"QuickBooks Online CSV",
     qbo_aide:"Bills to import into QuickBooks Online (Settings > Import data > Bills): amounts exclude tax, dates DD/MM/YYYY.", pied:"Facturo — your data is only used to produce your spreadsheet.",
     th_f:"Vendor", th_n:"No.", th_d:"Date", th_ht:"Net", th_tps:"GST", th_tvq:"QST", th_tx:"Tax", th_ttc:"Total", th_l:"Items",
@@ -586,6 +617,7 @@ btn.onclick=async()=>{
   if(baseExcel)fd.append('base',baseExcel,baseExcel.name);
   if(planFichier)fd.append('plan',planFichier,planFichier.name);
   fd.append('langue',LANG);
+  if(document.getElementById('qboInput').checked)fd.append('qbo','1');
   try{
     const r=await fetch('/api/extraire',{method:'POST',body:fd});
     if(r.status===429){dernier=null;restant=0;majOffre();
@@ -617,11 +649,17 @@ function afficher(d){
   const cumul=document.getElementById('cumul'), tot=d.totaux_fichier||[];
   cumul.innerHTML=tot.map(t=>`Σ ${T('cumul')} : <b>${fmt(t.total_ttc)} ${t.devise}</b> · ${T('dont_taxes')} ${fmt(t.taxes)} ${t.devise} · ${t.nb} ${T('nb_fact')}`).join('<br>');
   cumul.classList.toggle('masque',!tot.length);
+  const q=document.getElementById('telQbo');
+  q.classList.toggle('masque',!d.qbo);
   if(d.download_id){tel.href='/telecharger/'+d.download_id;
-    const q=document.getElementById('telQbo'); q.href='/telecharger/'+d.download_id+'?format=qbo'; q.title=T('qbo_aide');}
+    q.href='/telecharger/'+d.download_id+'?format=qbo'; q.title=T('qbo_aide');}
   res.classList.remove('masque'); res.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 
+// Préférences « comptable » mémorisées dans ce navigateur uniquement.
+const avance=document.getElementById('avance'), qboInput=document.getElementById('qboInput');
+try{ if(localStorage.getItem('facturo_qbo')==='1'){qboInput.checked=true;avance.open=true;} }catch(e){}
+qboInput.addEventListener('change',()=>{try{localStorage.setItem('facturo_qbo',qboInput.checked?'1':'0');}catch(e){}});
 setLang(LANG);
 </script>
 </body>

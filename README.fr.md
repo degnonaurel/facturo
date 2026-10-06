@@ -23,6 +23,8 @@ pytest · Docker · déploiement continu sur Render.
 
 ## Fonctionnalités
 
+### Usage courant
+
 - **Traitement par lot** — déposez plusieurs factures d'un coup ; elles sont lues
   en parallèle.
 - **Photos ET PDF** — `.jpg .png .heic/.heif .webp` et PDF. Les photos et les
@@ -32,6 +34,19 @@ pytest · Docker · déploiement continu sur Render.
 - **Taxes canadiennes** — TPS et TVQ ventilées séparément ; TVH et TPS+TVP
   prises en compte dans le total des taxes.
 - **Regroupement** des pièces d'un même achat (reçu détaillé + relevé de paiement).
+- **Contrôles de cohérence** (HT + taxes ≈ TTC, somme des lignes ≈ HT)
+  signalés dans une colonne *Alertes*.
+- **Bilingue** — interface et pièces en français et en anglais ; l'Excel (noms
+  d'onglets, titres, alertes) suit la langue de travail, et un fichier existant
+  est reconnu dans l'une ou l'autre langue.
+
+### Pour les comptables
+
+Catégories et totaux sont toujours dans l'Excel, sur des onglets après le
+résumé : un usager courant peut les ignorer. L'import d'un plan comptable,
+l'ajout à un fichier existant et l'export QuickBooks se trouvent dans le
+panneau replié *Options pour comptables* de l'app web.
+
 - **Ajout à un Excel existant** — les nouvelles lignes s'ajoutent à la fin,
   sans écraser : pour tenir sa compta au fil de l'eau.
 - **Plan comptable** — chaque facture est catégorisée selon votre plan comptable
@@ -46,18 +61,16 @@ pytest · Docker · déploiement continu sur Render.
 - **Totaux cumulés** — une ligne TOTAL par devise en bas du résumé (nombre de
   factures, HT, TPS, TVQ, taxes, TTC), recalculée à chaque ajout ; l'app web
   affiche aussi le total cumulé du fichier.
-- **Export QuickBooks Online** — en plus de l'Excel, un CSV au format d'import
-  de factures fournisseurs de QuickBooks Online Canada (*Paramètres › Importer
-  des données › Factures*) : une ligne par article, noms de comptes de votre plan
-  comptable (importez le plan exporté de QuickBooks), montants hors taxes et
-  code de taxe canadien correspondant (`GST`, `HST ON`, `GST/QST QC - 9.975`,
-  `Exempt`, `Out of Scope`). À l'import, choisir les taxes « Exclusive » et le
-  format de date JJ/MM/AAAA.
-- **Contrôles de cohérence** (HT + taxes ≈ TTC, somme des lignes ≈ HT)
-  signalés dans une colonne *Alertes*.
-- **Bilingue** — interface et pièces en français et en anglais ; l'Excel (noms
-  d'onglets, titres, alertes) suit la langue de travail, et un fichier existant
-  est reconnu dans l'une ou l'autre langue.
+- **Export QuickBooks Online** (sur demande) — cochez *Préparer aussi un
+  fichier d'import QuickBooks Online* (ou `--qbo` en ligne de commande) pour
+  obtenir, **en plus** de l'Excel inchangé, un CSV au format d'import de factures
+  fournisseurs de QuickBooks Online Canada (*Paramètres › Importer des données ›
+  Factures*) : une ligne par article, noms de comptes de votre plan comptable
+  (importez le plan exporté de QuickBooks), montants hors taxes et code de taxe
+  canadien correspondant (`GST`, `HST ON`, `GST/QST QC - 9.975`, `Exempt`,
+  `Out of Scope`) — fini la ressaisie. Seules les pièces de l'envoi en cours y
+  figurent : un ajout ne crée jamais de doublon. Trousse de test :
+  [`exemples/quickbooks/`](exemples/quickbooks/).
 
 ## Démarrage rapide
 
