@@ -96,6 +96,7 @@ class Facture:
     alertes: list[str] = field(default_factory=list)
     pieces_liees: list[str] = field(default_factory=list)   # autres fichiers du même achat
     numeros_lies: list[str] = field(default_factory=list)   # leurs numéros
+    categorie: str = ""      # compte du plan comptable (« code · nom »)
 
     def valider_coherence(self) -> None:
         def egal(a: float, b: float, tol: float = 0.02) -> bool:
@@ -275,15 +276,27 @@ def extraire_avec_llm(
     fournisseur: str = "auto",
     modele: Optional[str] = None,
     timeout: int = 120,
+    plan: Optional[list[dict]] = None,
 ) -> dict[str, Any]:
-    """Envoie du texte OU des images à un LLM et renvoie un dict structuré."""
+    """
+    Envoie du texte OU des images à un LLM et renvoie un dict structuré.
+    Avec un `plan` comptable, le LLM choisit aussi le compte de la pièce.
+    """
     if not texte and not images:
         raise ErreurLLM("Aucun contenu à extraire.")
     fournisseur = _resoudre_fournisseur(fournisseur)
+    schema, consigne = _SCHEMA_FACTURE, ""
+    if plan:
+        schema = json.loads(json.dumps(_SCHEMA_FACTURE))
+        schema["properties"]["compte"] = {
+            "type": "string", "enum": [_id_compte(c) for c in plan],
+            "description": "Compte du plan comptable le plus adapté à la pièce"}
+        schema["required"] = schema["required"] + ["compte"]
+        consigne = _consigne_plan(plan)
     if fournisseur == "claude":
-        return _appeler_claude(texte, images, modele, timeout)
+        return _appeler_claude(texte, images, modele, timeout, schema, consigne)
     if fournisseur == "openai":
-        return _appeler_openai(texte, images, modele, timeout)
+        return _appeler_openai(texte, images, modele, timeout, schema, consigne)
     raise ErreurLLM(f"Fournisseur LLM inconnu : {fournisseur}")
 
 
@@ -300,7 +313,7 @@ def _resoudre_fournisseur(fournisseur: str) -> str:
         "(Le mode --moteur tables hors ligne ne fonctionne que sur les PDF texte.)")
 
 
-def _appeler_claude(texte, images, modele, timeout):
+def _appeler_claude(texte, images, modele, timeout, schema=_SCHEMA_FACTURE, consigne=""):
     import requests
     cle = os.getenv("ANTHROPIC_API_KEY")
     if not cle:
@@ -313,13 +326,14 @@ def _appeler_claude(texte, images, modele, timeout):
         contenu.append({"type": "image", "source": {
             "type": "base64", "media_type": media_type, "data": b64}})
     contenu.append({"type": "text",
-                    "text": _PROMPT_TXT.format(texte=texte) if texte else _PROMPT_IMG})
+                    "text": (_PROMPT_TXT.format(texte=texte) if texte else _PROMPT_IMG)
+                    + consigne})
 
     corps = {
         "model": modele, "max_tokens": 4096, "system": _INSTRUCTION,
         "tools": [{"name": "enregistrer_facture",
                    "description": "Enregistre les données extraites.",
-                   "input_schema": _SCHEMA_FACTURE}],
+                   "input_schema": schema}],
         "tool_choice": {"type": "tool", "name": "enregistrer_facture"},
         "messages": [{"role": "user", "content": contenu}],
     }
@@ -336,7 +350,7 @@ def _appeler_claude(texte, images, modele, timeout):
     raise ErreurLLM("Réponse Claude sans appel d'outil exploitable.")
 
 
-def _appeler_openai(texte, images, modele, timeout):
+def _appeler_openai(texte, images, modele, timeout, schema=_SCHEMA_FACTURE, consigne=""):
     import requests
     cle = os.getenv("OPENAI_API_KEY")
     if not cle:
@@ -345,12 +359,13 @@ def _appeler_openai(texte, images, modele, timeout):
     modele = modele or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     contenu: list[dict[str, Any]] = [
-        {"type": "text", "text": _PROMPT_TXT.format(texte=texte) if texte else _PROMPT_IMG}]
+        {"type": "text",
+         "text": (_PROMPT_TXT.format(texte=texte) if texte else _PROMPT_IMG) + consigne}]
     for media_type, b64 in (images or []):
         contenu.append({"type": "image_url",
                         "image_url": {"url": f"data:{media_type};base64,{b64}"}})
 
-    schema = json.loads(json.dumps(_SCHEMA_FACTURE))
+    schema = json.loads(json.dumps(schema))
     schema["additionalProperties"] = False
     corps = {
         "model": modele,
@@ -468,7 +483,8 @@ def normaliser_devise(v) -> str:
     return _DEVISES.get(d, d)
 
 
-def _vers_facture(chemin: str, brut: dict[str, Any], moteur: str) -> Facture:
+def _vers_facture(chemin: str, brut: dict[str, Any], moteur: str,
+                  plan: Optional[list[dict]] = None) -> Facture:
     lignes = [LigneFacture(
         description=str(l.get("description", "")).strip(),
         quantite=_nombre(l.get("quantite")),
@@ -485,7 +501,8 @@ def _vers_facture(chemin: str, brut: dict[str, Any], moteur: str) -> Facture:
         tva=_nombre(brut.get("tva")),
         total_ttc=_nombre(brut.get("total_ttc")),
         devise=normaliser_devise(brut.get("devise")),
-        lignes=lignes, moteur=moteur)
+        lignes=lignes, moteur=moteur,
+        categorie=libelle_compte(plan, brut.get("compte")))
     f.valider_coherence()
     return f
 
@@ -561,7 +578,8 @@ def _type_source(chemin: str) -> str:
     return "inconnu"
 
 
-def traiter_facture(chemin, moteur="auto", fournisseur_llm="auto", modele=None):
+def traiter_facture(chemin, moteur="auto", fournisseur_llm="auto", modele=None,
+                    plan=None):
     """Traite un PDF ou une image et renvoie une Facture."""
     type_src = _type_source(chemin)
     cle_dispo = bool(os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY"))
@@ -573,8 +591,10 @@ def traiter_facture(chemin, moteur="auto", fournisseur_llm="auto", modele=None):
                 f"{os.path.basename(chemin)} est une image : le mode 'tables' "
                 "hors ligne ne peut pas la lire. Utilisez le moteur LLM (clé API).")
         images = [preparer_image(chemin)]
-        brut = extraire_avec_llm(images=images, fournisseur=fournisseur_llm, modele=modele)
-        return _vers_facture(chemin, brut, f"vision:{_resoudre_fournisseur(fournisseur_llm)}")
+        brut = extraire_avec_llm(images=images, fournisseur=fournisseur_llm,
+                                 modele=modele, plan=plan)
+        return _vers_facture(chemin, brut, f"vision:{_resoudre_fournisseur(fournisseur_llm)}",
+                            plan)
 
     # --- PDF ---
     if type_src == "pdf":
@@ -587,14 +607,18 @@ def traiter_facture(chemin, moteur="auto", fournisseur_llm="auto", modele=None):
                 f.alertes.append("PDF scanné (aucun texte) : illisible en mode 'tables'.")
                 return f
             images = _rendre_pdf_en_images(chemin)
-            brut = extraire_avec_llm(images=images, fournisseur=fournisseur_llm, modele=modele)
-            return _vers_facture(chemin, brut, f"vision:{_resoudre_fournisseur(fournisseur_llm)}")
+            brut = extraire_avec_llm(images=images, fournisseur=fournisseur_llm,
+                                 modele=modele, plan=plan)
+            return _vers_facture(chemin, brut, f"vision:{_resoudre_fournisseur(fournisseur_llm)}",
+                            plan)
 
         if veut_llm:
             try:
                 brut = extraire_avec_llm(texte=extraire_texte_pdf(chemin),
-                                         fournisseur=fournisseur_llm, modele=modele)
-                return _vers_facture(chemin, brut, f"llm:{_resoudre_fournisseur(fournisseur_llm)}")
+                                         fournisseur=fournisseur_llm, modele=modele,
+                                         plan=plan)
+                return _vers_facture(chemin, brut, f"llm:{_resoudre_fournisseur(fournisseur_llm)}",
+                                     plan)
             except ErreurLLM:
                 if moteur == "llm":
                     raise
@@ -604,6 +628,158 @@ def traiter_facture(chemin, moteur="auto", fournisseur_llm="auto", modele=None):
         return _vers_facture(chemin, extraire_avec_tables(chemin), "tables")
 
     raise ErreurLLM(f"Type de fichier non pris en charge : {os.path.basename(chemin)}")
+
+
+# =================================================================
+#  5 bis. PLAN COMPTABLE (catégorisation des pièces)
+# =================================================================
+# Un plan = liste de comptes {code, nom, type}. Il vient, par ordre de
+# priorité : d'un fichier fourni (Excel/CSV), de l'onglet « Plan comptable »
+# d'un classeur existant, ou du plan par défaut ci-dessous (catégories de
+# dépenses usuelles d'une petite entreprise canadienne, inspirées du T2125).
+
+_PLAN_DEFAUT = [  # (code, nom FR, nom EN, type)
+    ("1500", "Équipement et mobilier", "Equipment and furniture", "actif"),
+    ("1550", "Matériel informatique", "Computer equipment", "actif"),
+    ("4000", "Ventes et revenus", "Sales and revenue", "revenu"),
+    ("5100", "Achats de marchandises", "Purchases of goods for resale", "depense"),
+    ("5200", "Publicité et marketing", "Advertising and marketing", "depense"),
+    ("5210", "Repas et représentation", "Meals and entertainment", "depense"),
+    ("5220", "Assurances", "Insurance", "depense"),
+    ("5230", "Intérêts et frais bancaires", "Interest and bank charges", "depense"),
+    ("5240", "Fournitures de bureau", "Office supplies", "depense"),
+    ("5250", "Logiciels et abonnements", "Software and subscriptions", "depense"),
+    ("5260", "Honoraires professionnels", "Professional fees", "depense"),
+    ("5270", "Loyer", "Rent", "depense"),
+    ("5280", "Entretien et réparations", "Repairs and maintenance", "depense"),
+    ("5290", "Frais de déplacement", "Travel", "depense"),
+    ("5300", "Télécommunications et services publics", "Telephone and utilities", "depense"),
+    ("5310", "Carburant", "Fuel", "depense"),
+    ("5320", "Location de véhicule", "Vehicle rental", "depense"),
+    ("5330", "Frais de véhicule (entretien, permis)", "Motor vehicle expenses", "depense"),
+    ("5340", "Livraison et transport", "Delivery and freight", "depense"),
+    ("5350", "Formation", "Training", "depense"),
+    ("5360", "Fournitures et matériel (autres)", "Supplies and materials (other)", "depense"),
+    ("5900", "Autres dépenses", "Other expenses", "depense"),
+]
+_TYPES = {"actif": ("Actif", "Asset"), "passif": ("Passif", "Liability"),
+          "capitaux": ("Capitaux propres", "Equity"), "revenu": ("Revenus", "Revenue"),
+          "depense": ("Dépenses", "Expense")}
+
+
+def plan_par_defaut(langue: str = "fr") -> list[dict]:
+    i = 1 if langue == "en" else 0
+    return [{"code": c, "nom": (fr, en)[i], "type": _TYPES[t][i]}
+            for c, fr, en, t in _PLAN_DEFAUT]
+
+
+def _id_compte(c: dict) -> str:
+    """Identifiant d'un compte transmis au LLM : son code, sinon son nom."""
+    return c["code"] or c["nom"]
+
+
+def libelle_compte(plan: Optional[list[dict]], ident) -> str:
+    """« 5320 · Location de véhicule » à partir de l'identifiant choisi."""
+    for c in plan or []:
+        if ident is not None and _id_compte(c) == str(ident).strip():
+            return f"{c['code']} · {c['nom']}" if c["code"] else c["nom"]
+    return ""
+
+
+def _consigne_plan(plan: list[dict]) -> str:
+    comptes = "\n".join(f"- {_id_compte(c)} : {c['nom']}"
+                        + (f" ({c['type']})" if c["type"] else "") for c in plan)
+    return ("\n\nCatégorise aussi la pièce : dans 'compte', donne l'identifiant "
+            "du compte le plus adapté de ce plan comptable, d'après le fournisseur "
+            "et les articles achetés (une facture d'achat va en général dans une "
+            "dépense ; un bien durable coûteux peut être un actif) :\n" + comptes)
+
+
+_TITRES_PLAN = {
+    "code": ["code", "n°", "no", "numéro", "numero", "n° compte", "no compte",
+             "numéro de compte", "account no", "account no.", "account number",
+             "number", "gl", "#"],
+    "nom": ["compte", "nom", "libellé", "libelle", "intitulé", "intitule",
+            "nom du compte", "description", "account", "account name", "name",
+            "title"],
+    "type": ["type", "classe", "class", "catégorie", "categorie", "category",
+             "nature"],
+}
+
+
+def _plan_depuis_lignes(lignes: list[list]) -> list[dict]:
+    """Construit un plan à partir de lignes de tableau (avec ou sans titres)."""
+    lignes = [[("" if v is None else str(v).strip()) for v in l] for l in lignes]
+    lignes = [l for l in lignes if any(l)]
+    if not lignes:
+        return []
+    titres = [v.lower() for v in lignes[0]]
+    col = {}
+    for cle, noms in _TITRES_PLAN.items():
+        for i, t in enumerate(titres):
+            if t in noms and i not in col.values():
+                col[cle] = i
+                break
+    if "nom" in col:
+        donnees = lignes[1:]
+    else:
+        # Sans titres reconnus : « code, nom[, type] » si la 1re colonne est
+        # numérique, sinon une simple liste de noms.
+        donnees = lignes
+        if all(re.fullmatch(r"[0-9][0-9.\-]*", l[0] or "0") for l in donnees) \
+                and max(len(l) for l in donnees) > 1:
+            col = {"code": 0, "nom": 1, "type": 2}
+        else:
+            col = {"nom": 0}
+
+    def val(l, cle):
+        i = col.get(cle)
+        return l[i] if i is not None and i < len(l) else ""
+
+    plan, vus = [], set()
+    for l in donnees:
+        c = {"code": val(l, "code"), "nom": val(l, "nom"), "type": val(l, "type")}
+        if c["nom"] and _id_compte(c) not in vus:
+            vus.add(_id_compte(c))
+            plan.append(c)
+    return plan[:400]
+
+
+def lire_plan_comptable(chemin: str) -> list[dict]:
+    """Lit un plan comptable fourni en Excel (.xlsx) ou CSV."""
+    if chemin.lower().endswith(".csv"):
+        import csv
+        with open(chemin, newline="", encoding="utf-8-sig") as fh:
+            echantillon = fh.read(4096)
+            fh.seek(0)
+            try:
+                dialecte = csv.Sniffer().sniff(echantillon, delimiters=",;\t")
+            except csv.Error:
+                dialecte = csv.excel
+            return _plan_depuis_lignes(list(csv.reader(fh, dialecte)))
+    from openpyxl import load_workbook
+    wb = load_workbook(chemin, read_only=True, data_only=True)
+    ws = next((wb[n] for n in wb.sheetnames
+               if n.strip().lower() in _noms_connus("Plan comptable")), wb.worksheets[0])
+    return _plan_depuis_lignes([list(r) for r in ws.iter_rows(values_only=True)])
+
+
+def _feuille_plan(wb):
+    return next((wb[n] for n in wb.sheetnames
+                 if n.strip().lower() in _noms_connus("Plan comptable")), None)
+
+
+def _plan_de_classeur(wb) -> list[dict]:
+    ws = _feuille_plan(wb)
+    if ws is None:
+        return []
+    return _plan_depuis_lignes([list(r)[:3] for r in ws.iter_rows(values_only=True)])
+
+
+def plan_du_classeur(chemin: str) -> list[dict]:
+    """Plan comptable enregistré dans l'onglet dédié d'un classeur Facturo."""
+    from openpyxl import load_workbook
+    return _plan_de_classeur(load_workbook(chemin, read_only=True, data_only=True))
 
 
 # =================================================================
@@ -639,7 +815,7 @@ def _largeurs(ws, maxi=60):
 # anglaise. L'Excel est écrit dans la langue demandée (« fr » ou « en »).
 _COLS_RESUME = ["Fichier", "Fournisseur", "N°", "Date", "Devise", "Total HT",
                 "TPS", "TVQ", "Taxes", "Total TTC", "Nb lignes",
-                "Regroupé avec", "Alertes"]
+                "Regroupé avec", "Alertes", "Catégorie"]
 _COLS_DETAILS = ["Fichier", "Fournisseur", "N°", "Description", "Quantité",
                  "Prix unitaire", "Montant"]
 _EN = {
@@ -650,6 +826,8 @@ _EN = {
     "Nb lignes": "Items", "Regroupé avec": "Grouped with", "Alertes": "Warnings",
     "Description": "Description", "Quantité": "Quantity",
     "Prix unitaire": "Unit price", "Montant": "Amount",
+    "Catégorie": "Category", "Plan comptable": "Chart of accounts",
+    "Code": "Code", "Compte": "Account", "Type": "Type",
 }
 
 # Autres titres acceptés pour une colonne, quand on ajoute à un classeur
@@ -663,6 +841,8 @@ _SYNONYMES = {
     "Total TTC": ["ttc", "montant total"],
     "Nb lignes": ["lignes"],
     "Alertes": ["alerts"],
+    "Catégorie": ["categorie", "catégorie comptable", "compte comptable"],
+    "Plan comptable": ["plan", "accounts", "coa"],
 }
 
 
@@ -817,14 +997,48 @@ def totaux_resume(chemin: str) -> list[dict]:
     return _calculer_totaux(ws, col) if "Fichier" in col else []
 
 
+def _ecrire_plan(wb, plan: list[dict], langue: str):
+    """(Ré)écrit l'onglet du plan comptable dans la langue demandée ; la 4e
+    colonne contient les libellés proposés dans la liste déroulante."""
+    ancien = _feuille_plan(wb)
+    if ancien is not None:
+        wb.remove(ancien)
+    cols = ["Code", "Compte", "Type", "Catégorie"]
+    ws = wb.create_sheet(_titre("Plan comptable", langue))
+    ws.append([_titre(c, langue) for c in cols])
+    _entete(ws, len(cols))
+    for c in plan:
+        ws.append([c["code"] or None, c["nom"], c["type"] or None,
+                   libelle_compte(plan, _id_compte(c))])
+    _largeurs(ws)
+    return ws
+
+
+def _liste_deroulante(ws, colonne: int, plan_ws, nb: int) -> None:
+    """Liste déroulante des catégories (saisie libre toujours permise)."""
+    from openpyxl.worksheet.datavalidation import DataValidation
+    noms_plan = _noms_connus("Plan comptable")
+    ws.data_validations.dataValidation = [
+        v for v in ws.data_validations.dataValidation
+        if not any(n in (v.formula1 or "").lower() for n in noms_plan)]
+    dv = DataValidation(type="list", allow_blank=True, showErrorMessage=False,
+                        formula1=f"'{plan_ws.title}'!$D$2:$D${nb + 1}")
+    lettre = get_column_letter(colonne)
+    dv.add(f"{lettre}2:{lettre}5000")
+    ws.add_data_validation(dv)
+
+
 def construire_excel(factures: list[Facture], chemin_sortie: str,
-                     base_excel: Optional[str] = None, langue: str = "fr") -> str:
+                     base_excel: Optional[str] = None, langue: str = "fr",
+                     plan: Optional[list[dict]] = None) -> str:
     """
     Écrit les factures dans un classeur Excel, titres dans `langue` (« fr »
     ou « en »). Si `base_excel` pointe vers un classeur existant, les nouvelles
     lignes y sont AJOUTÉES à la suite (feuilles Resume/Summary et Details),
     sans écraser l'existant ; le classeur prend la langue de cet ajout.
-    Sinon un nouveau classeur est créé.
+    Sinon un nouveau classeur est créé. Le `plan` comptable (sinon celui déjà
+    enregistré dans le classeur) est écrit dans un onglet dédié et proposé en
+    liste déroulante dans la colonne Catégorie.
     """
     if base_excel and os.path.isfile(base_excel):
         from openpyxl import load_workbook
@@ -852,13 +1066,18 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
             "Date": f.date, "Devise": f.devise, "Total HT": f.total_ht,
             "TPS": f.tps, "TVQ": f.tvq, "Taxes": f.tva, "Total TTC": f.total_ttc,
             "Nb lignes": len(f.lignes), "Regroupé avec": regroupe,
-            "Alertes": " | ".join(alertes)})
+            "Alertes": " | ".join(alertes), "Catégorie": f.categorie or None})
         for cle in ("Total HT", "TPS", "TVQ", "Taxes", "Total TTC"):
             ws.cell(row=r, column=pos_r[cle]).number_format = _MON
         if alertes:
             ws.cell(row=r, column=pos_r["Alertes"]).fill = _ALERTE
     _ajouter_totaux(ws, pos_r, langue)
     _largeurs(ws)
+
+    plan = plan or _plan_de_classeur(wb)
+    if plan:
+        plan_ws = _ecrire_plan(wb, plan, langue)
+        _liste_deroulante(ws, pos_r["Catégorie"], plan_ws, len(plan))
 
     for f in factures:
         for l in f.lignes:
@@ -892,6 +1111,9 @@ def _parseur():
     p.add_argument("--modele", default=None)
     p.add_argument("--pas-de-regroupement", action="store_true",
                    help="Désactive le regroupement des pièces d'un même achat.")
+    p.add_argument("--plan", default=None, metavar="PLAN.xlsx|csv",
+                   help="Plan comptable pour catégoriser les pièces "
+                        "(défaut : celui du classeur --ajouter-a, sinon plan standard).")
     p.add_argument("--langue", choices=["fr", "en"], default="fr",
                    help="Langue des titres de l'Excel (fr ou en).")
     p.add_argument("--json", action="store_true")
@@ -901,6 +1123,10 @@ def _parseur():
 def main(argv=None):
     args = _parseur().parse_args(argv)
     factures = []
+    plan = lire_plan_comptable(args.plan) if args.plan else []
+    if not plan and getattr(args, "ajouter_a", None) and os.path.isfile(args.ajouter_a):
+        plan = plan_du_classeur(args.ajouter_a)
+    plan = plan or plan_par_defaut(args.langue)
     for chemin in args.fichiers:
         if not os.path.isfile(chemin):
             print(f"  ✗ Introuvable : {chemin}", file=sys.stderr)
@@ -909,7 +1135,8 @@ def main(argv=None):
               file=sys.stderr)
         try:
             f = traiter_facture(chemin, moteur=args.moteur,
-                                fournisseur_llm=args.fournisseur, modele=args.modele)
+                                fournisseur_llm=args.fournisseur, modele=args.modele,
+                                plan=plan)
         except ErreurLLM as e:
             print(f"  ✗ {e}", file=sys.stderr)
             continue
@@ -931,7 +1158,7 @@ def main(argv=None):
               file=sys.stderr)
     base = getattr(args, "ajouter_a", None)
     chemin = construire_excel(factures, args.sortie, base_excel=base,
-                              langue=args.langue)
+                              langue=args.langue, plan=plan)
     suffixe = f" (ajoutées à {os.path.basename(base)})" if base else ""
     print(f"\n✓ {len(factures)} facture(s) -> {chemin}{suffixe}", file=sys.stderr)
     return 0

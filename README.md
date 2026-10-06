@@ -32,6 +32,10 @@ continuous deployment on Render.
 - **Grouping** of documents from the same purchase (itemized receipt + payment slip).
 - **Append to an existing Excel file** — new rows are added at the end, nothing
   is overwritten: keep your books up to date as you go.
+- **Chart of accounts** — each invoice is categorized against your own chart of
+  accounts (Excel/CSV import) or a standard Canadian small-business chart; a
+  *Category* column with a dropdown lets the accountant review and filter, and
+  the chart is saved in the workbook for the next appends.
 - **Running totals** — a TOTAL row per currency at the bottom of the summary
   (invoice count, subtotal, GST, QST, tax, total), recalculated on every append;
   the web app also shows the cumulative file total.

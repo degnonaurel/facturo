@@ -86,6 +86,7 @@ def statut():
 async def extraire(request: Request,
                    fichiers: list[UploadFile] = File(...),
                    base: Optional[UploadFile] = File(None),
+                   plan: Optional[UploadFile] = File(None),
                    langue: str = Form("fr")):
     langue = "en" if langue == "en" else "fr"
     if not _reserver_quota(_visiteur(request), len(fichiers)):
@@ -99,13 +100,35 @@ async def extraire(request: Request,
             with open(base_path, "wb") as f:
                 f.write(await base.read())
 
+        # Plan comptable : fichier fourni > onglet du classeur de base > défaut.
+        plan_comptable = []
+        if plan is not None and plan.filename:
+            ext = ".csv" if plan.filename.lower().endswith(".csv") else ".xlsx"
+            plan_path = os.path.join(tmp, "plan" + ext)
+            with open(plan_path, "wb") as f:
+                f.write(await plan.read())
+            try:
+                plan_comptable = fve.lire_plan_comptable(plan_path)
+            except Exception:
+                pass
+            if not plan_comptable:
+                erreurs.append({"fichier": plan.filename, "message": (
+                    "Chart of accounts unreadable, default plan used" if langue == "en"
+                    else "Plan comptable illisible, plan par défaut utilisé")})
+        if not plan_comptable and base_path:
+            try:
+                plan_comptable = fve.plan_du_classeur(base_path)
+            except Exception:
+                pass
+        plan_comptable = plan_comptable or fve.plan_par_defaut(langue)
+
         for up in fichiers:
             ext = os.path.splitext(up.filename or "")[1] or ".bin"
             dest = os.path.join(tmp, f"{uuid.uuid4().hex}{ext}")
             with open(dest, "wb") as f:
                 f.write(await up.read())
             try:
-                fac = fve.traiter_facture(dest)
+                fac = fve.traiter_facture(dest, plan=plan_comptable)
                 fac.fichier = up.filename or fac.fichier
                 factures.append(fac)
             except fve.ErreurLLM as e:
@@ -121,14 +144,15 @@ async def extraire(request: Request,
         jeton = uuid.uuid4().hex
         chemin = os.path.join(_DOSSIER, f"facturo_{jeton}.xlsx")
         try:
-            fve.construire_excel(factures, chemin, base_excel=base_path, langue=langue)
+            fve.construire_excel(factures, chemin, base_excel=base_path, langue=langue,
+                                 plan=plan_comptable)
         except Exception as e:
             # Excel de base illisible : on repart sur un fichier neuf.
             erreurs.append({"fichier": base.filename if base else "Excel existant",
                             "message": (f"Existing Excel unreadable, new file created ({e})"
                                         if langue == "en" else
                                         f"Excel existant illisible, nouveau fichier créé ({e})")})
-            fve.construire_excel(factures, chemin, langue=langue)
+            fve.construire_excel(factures, chemin, langue=langue, plan=plan_comptable)
         _TELECHARGEMENTS[jeton] = chemin
         try:
             totaux = fve.totaux_resume(chemin)
@@ -140,6 +164,7 @@ async def extraire(request: Request,
         "date": f.date, "devise": f.devise, "total_ht": f.total_ht,
         "tps": f.tps, "tvq": f.tvq, "tva": f.tva, "total_ttc": f.total_ttc,
         "nb_lignes": len(f.lignes), "pieces_liees": f.pieces_liees,
+        "categorie": f.categorie,
         "alertes": [fve.traduire_alerte(a, langue) for a in f.alertes],
     } for f in factures]
     return {"factures": resume, "erreurs": erreurs, "download_id": jeton,
@@ -327,6 +352,14 @@ _PAGE = r"""<!DOCTYPE html>
         <span class="base-hint" data-i18n="base_hint">optionnel — les nouvelles lignes s'ajoutent à la fin de votre fichier</span>
         <div id="baseNom" class="base-nom masque"></div>
       </div>
+      <div class="base-zone">
+        <label class="base-btn">
+          <input id="planInput" type="file" accept=".xlsx,.csv" class="masque">
+          <span>＋ <span data-i18n="plan_btn">Importer mon plan comptable</span></span>
+        </label>
+        <span class="base-hint" data-i18n="plan_hint">optionnel — Excel ou CSV ; sinon un plan standard est utilisé pour catégoriser</span>
+        <div id="planNom" class="base-nom masque"></div>
+      </div>
 
       <div class="actions">
         <button id="btn" class="btn pri" disabled data-i18n="btn">Convertir en Excel</button>
@@ -370,6 +403,8 @@ const I18N = {
     th_f:"Fournisseur", th_n:"N°", th_d:"Date", th_ht:"HT", th_tps:"TPS", th_tvq:"TVQ", th_tx:"Taxes", th_ttc:"TTC", th_l:"Lignes",
     regroupe:"regroupé avec", pieces:"pièce(s)", aucune:"Aucune donnée n'a pu être extraite.", reseau:"Erreur réseau : ",
     quota:"Limite de la démo atteinte pour aujourd'hui. Revenez demain !",
+    plan_btn:"Importer mon plan comptable", plan_hint:"optionnel — Excel ou CSV ; sinon un plan standard est utilisé pour catégoriser",
+    plan_choisi:"Plan comptable :", th_cat:"Catégorie",
     cumul:"Total du fichier", dont_taxes:"dont taxes", nb_fact:"facture(s) depuis le début" },
   en:{ statut_check:"Checking…", statut_on:"Service online", statut_off:"Service unavailable",
     hero1:"Your invoices and receipts,", hero2:"in Excel — from a photo.",
@@ -384,6 +419,8 @@ const I18N = {
     th_f:"Vendor", th_n:"No.", th_d:"Date", th_ht:"Net", th_tps:"GST", th_tvq:"QST", th_tx:"Tax", th_ttc:"Total", th_l:"Items",
     regroupe:"merged with", pieces:"item(s)", aucune:"No data could be extracted.", reseau:"Network error: ",
     quota:"Today's demo limit has been reached. Please come back tomorrow!",
+    plan_btn:"Import my chart of accounts", plan_hint:"optional — Excel or CSV; otherwise a standard chart is used to categorize",
+    plan_choisi:"Chart of accounts:", th_cat:"Category",
     cumul:"File total", dont_taxes:"incl. tax", nb_fact:"invoice(s) since the start" }
 };
 let LANG = localStorage.getItem('facturo_lang') || (navigator.language||'fr').slice(0,2);
@@ -397,7 +434,7 @@ function setLang(l){
   document.getElementById('fr').classList.toggle('actif',l==='fr');
   document.getElementById('en').classList.toggle('actif',l==='en');
   document.querySelectorAll('[data-i18n]').forEach(e=>{const k=e.getAttribute('data-i18n');if(I18N[l][k])e.textContent=I18N[l][k];});
-  majStatut(); rendreBase(); if(dernier) afficher(dernier);
+  majStatut(); rendreBase(); rendrePlan(); if(dernier) afficher(dernier);
 }
 
 const input=document.getElementById('input'), zone=document.getElementById('zone'),
@@ -433,6 +470,15 @@ function rendreBase(){
   baseNom.innerHTML=`<span>📗</span><span>${T('base_choisi')} ${baseExcel.name}</span><span class="x" title="✕">✕</span>`;
   baseNom.querySelector('.x').onclick=retirerBase;
 }
+let planFichier=null;
+const planInput=document.getElementById('planInput'), planNom=document.getElementById('planNom');
+planInput.addEventListener('change',()=>{ if(planInput.files[0]){planFichier=planInput.files[0];rendrePlan();} });
+function rendrePlan(){
+  if(!planFichier){planNom.classList.add('masque');planNom.innerHTML='';return;}
+  planNom.classList.remove('masque');
+  planNom.innerHTML=`<span>🗂️</span><span>${T('plan_choisi')} ${planFichier.name}</span><span class="x" title="✕">✕</span>`;
+  planNom.querySelector('.x').onclick=()=>{planFichier=null;planInput.value='';rendrePlan();};
+}
 function rendreListe(){
   liste.innerHTML='';
   fichiers.forEach((f,i)=>{
@@ -451,6 +497,7 @@ btn.onclick=async()=>{
   etat.innerHTML='<span class="spin"></span> '+T('traitement');
   const fd=new FormData(); fichiers.forEach(f=>fd.append('fichiers',f,f.name));
   if(baseExcel)fd.append('base',baseExcel,baseExcel.name);
+  if(planFichier)fd.append('plan',planFichier,planFichier.name);
   fd.append('langue',LANG);
   try{
     const r=await fetch('/api/extraire',{method:'POST',body:fd});
@@ -466,7 +513,7 @@ function afficher(d){
   if(!d.factures||!d.factures.length){res.classList.add('masque');if(d.erreurs&&d.erreurs.length){}else errBox.textContent=T('aucune');return;}
   let h=`<thead><tr><th>${T('th_f')}</th><th>${T('th_n')}</th><th>${T('th_d')}</th>
     <th>${T('th_ht')}</th><th>${T('th_tps')}</th><th>${T('th_tvq')}</th><th>${T('th_tx')}</th>
-    <th>${T('th_ttc')}</th><th>${T('th_l')}</th></tr></thead><tbody>`;
+    <th>${T('th_ttc')}</th><th>${T('th_l')}</th><th>${T('th_cat')}</th></tr></thead><tbody>`;
   d.factures.forEach(f=>{
     let extra='';
     if(f.pieces_liees&&f.pieces_liees.length)extra+=`<span class="lie">↻ ${T('regroupe')} ${f.pieces_liees.join(', ')}</span>`;
@@ -474,7 +521,7 @@ function afficher(d){
     h+=`<tr><td>${f.fournisseur||'—'}${extra}</td><td>${f.numero||''}</td><td>${f.date||''}</td>
         <td class="num">${fmt(f.total_ht)}</td><td class="num">${fmt(f.tps)}</td><td class="num">${fmt(f.tvq)}</td>
         <td class="num">${fmt(f.tva)}</td><td class="num">${fmt(f.total_ttc)} ${f.devise||''}</td>
-        <td class="num">${f.nb_lignes}</td></tr>`;
+        <td class="num">${f.nb_lignes}</td><td>${f.categorie||''}</td></tr>`;
   });
   tab.innerHTML=h+'</tbody>';
   document.getElementById('titreRes').textContent=`${T('res')} — ${d.factures.length} ${T('pieces')}`;

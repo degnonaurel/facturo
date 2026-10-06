@@ -28,7 +28,7 @@ def test_extraire_et_telecharger(tmp_path):
     assert len(d["factures"]) == 1 and d["download_id"]
     xl = client.get("/telecharger/" + d["download_id"]).content
     wb = load_workbook(io.BytesIO(xl))
-    assert wb.sheetnames == ["Resume", "Details"]
+    assert wb.sheetnames == ["Resume", "Details", "Plan comptable"]
 
 
 def test_ajout_a_base_via_web(tmp_path):
@@ -80,7 +80,7 @@ def test_langue_anglaise_via_web(tmp_path):
         files = [("fichiers", ("f.pdf", fh.read(), "application/pdf"))]
     d = client.post("/api/extraire", files=files, data={"langue": "en"}).json()
     wb = load_workbook(io.BytesIO(client.get("/telecharger/" + d["download_id"]).content))
-    assert wb.sheetnames == ["Summary", "Details"]
+    assert wb.sheetnames == ["Summary", "Details", "Chart of accounts"]
     assert wb["Summary"]["A1"].value == "File"
 
 

@@ -32,6 +32,10 @@ pytest · Docker · déploiement continu sur Render.
 - **Regroupement** des pièces d'un même achat (reçu détaillé + relevé de paiement).
 - **Ajout à un Excel existant** — les nouvelles lignes s'ajoutent à la fin,
   sans écraser : pour tenir sa compta au fil de l'eau.
+- **Plan comptable** — chaque facture est catégorisée selon votre plan comptable
+  (import Excel/CSV) ou un plan standard de PME canadienne ; une colonne
+  *Catégorie* avec liste déroulante permet au comptable de vérifier et filtrer,
+  et le plan est enregistré dans le classeur pour les ajouts suivants.
 - **Totaux cumulés** — une ligne TOTAL par devise en bas du résumé (nombre de
   factures, HT, TPS, TVQ, taxes, TTC), recalculée à chaque ajout ; l'app web
   affiche aussi le total cumulé du fichier.
