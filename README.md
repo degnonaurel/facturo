@@ -65,7 +65,10 @@ accountants* panel of the web app.
   the same amount at a plausible date, the supplier name in the bank label
   breaking ties. A *Bank reconciliation* sheet lists matched transactions,
   **expenses without a receipt** (highlighted) and invoices missing from the
-  statement. Works with a statement alone on an existing workbook. Sample:
+  statement. Expenses without a receipt get a suggested account from the bank
+  label (fuel, meals, bank fees, telecom...), and an invoice in USD, EUR or GBP
+  paid from a CAD account is still recognized (flagged for review). Works with
+  a statement alone on an existing workbook. Sample:
   [`exemples/releves/`](exemples/releves/).
 - **QuickBooks Online export** (opt-in) — tick *Also prepare a QuickBooks Online
   import file* (or `--qbo` on the command line) to get, **in addition to** the

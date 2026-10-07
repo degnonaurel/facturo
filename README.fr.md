@@ -68,8 +68,10 @@ panneau replié *Options pour comptables* de l'app web.
   à un débit de même montant à une date plausible, le nom du fournisseur dans
   le libellé bancaire départageant les cas douteux. Un onglet *Rapprochement*
   liste les transactions rapprochées, les **dépenses sans pièce** (surlignées)
-  et les factures absentes du relevé. Fonctionne aussi avec un relevé seul sur
-  un classeur existant. Exemple : [`exemples/releves/`](exemples/releves/).
+  et les factures absentes du relevé. Les dépenses sans pièce reçoivent un compte suggéré d'après le
+  libellé bancaire (carburant, repas, frais bancaires, télécom...), et une
+  facture en USD, EUR ou GBP payée depuis un compte en CAD est reconnue (à
+  vérifier). Fonctionne aussi avec un relevé seul sur un classeur existant. Exemple : [`exemples/releves/`](exemples/releves/).
 - **Export QuickBooks Online** (sur demande) — cochez *Préparer aussi un
   fichier d'import QuickBooks Online* (ou `--qbo` en ligne de commande) pour
   obtenir, **en plus** de l'Excel inchangé, un CSV au format d'import de factures

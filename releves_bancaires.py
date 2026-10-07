@@ -308,13 +308,39 @@ def _jours(a: str, b: str) -> Optional[int]:
         return None
 
 
+# Fourchettes de change plausibles (CAD pour 1 unité) pour reconnaître une
+# facture en devise étrangère payée depuis un compte en dollars canadiens.
+# Larges exprès : on ne connaît pas le taux du jour ni les frais de la banque,
+# c'est le nom du fournisseur et la date qui confirment le rapprochement.
+TAUX_PLAUSIBLES = {"USD": (1.20, 1.55), "EUR": (1.35, 1.70), "GBP": (1.60, 2.00)}
+
+
+def _montant_compatible(t: Transaction, p: dict) -> Optional[str]:
+    """« exact », « converti » (devise étrangère payée en CAD) ou None."""
+    total = p.get("total_ttc")
+    if not isinstance(total, (int, float)) or total <= 0:
+        return None
+    paye = abs(t.montant)
+    dev_p, dev_t = p.get("devise") or "", t.devise or ""
+    if not dev_p or not dev_t or dev_p == dev_t or (dev_p == "CAD" and not dev_t):
+        if abs(paye - total) <= 0.01:
+            return "exact"
+    if dev_p in TAUX_PLAUSIBLES and dev_t in ("", "CAD"):
+        bas, haut = TAUX_PLAUSIBLES[dev_p]
+        if bas <= paye / total <= haut:
+            return "converti"
+    return None
+
+
 def rapprocher(transactions: list[Transaction], pieces: list[dict]) -> dict:
     """
     Associe chaque pièce {fichier, fournisseur, numero, date, devise,
     total_ttc, categorie} à au plus un débit du relevé (et inversement).
     Critères : même montant (à 1 ¢ près), même devise si connue, écart de
     dates plausible ; le nom du fournisseur dans le libellé départage et
-    élargit la fenêtre. Renvoie {"paires": [(i_transaction, i_piece,
+    élargit la fenêtre. Une facture en USD/EUR/GBP payée depuis un compte en
+    CAD est reconnue (confiance « converti ») si le montant payé tombe dans
+    une fourchette de change plausible, avec le nom ET une date proche. Renvoie {"paires": [(i_transaction, i_piece,
     écart, confiance)], "transactions_seules": [...], "pieces_seules": [...]}.
     """
     candidats = []
@@ -322,13 +348,17 @@ def rapprocher(transactions: list[Transaction], pieces: list[dict]) -> dict:
         if t.montant >= 0:
             continue
         for k, p in enumerate(pieces):
-            total = p.get("total_ttc")
-            if not isinstance(total, (int, float)) or abs(abs(t.montant) - total) > 0.01:
-                continue
-            if t.devise and p.get("devise") and t.devise != p["devise"]:
+            montant = _montant_compatible(t, p)
+            if montant is None:
                 continue
             nom = meme_fournisseur(p.get("fournisseur", ""), t.description)
             ecart = _jours(t.date, p.get("date", ""))
+            if montant == "converti":
+                # Montant seulement approché : nom du fournisseur ET date proche.
+                if not nom or ecart is None or not (-JOURS_AVANT <= ecart <= JOURS_SANS_NOM):
+                    continue
+                candidats.append((50 - abs(ecart), i, k, ecart, "converti"))
+                continue
             if ecart is None:
                 if not nom:
                     continue
@@ -349,3 +379,55 @@ def rapprocher(transactions: list[Transaction], pieces: list[dict]) -> dict:
     return {"paires": sorted(paires),
             "transactions_seules": [i for i in range(len(transactions)) if i not in t_pris],
             "pieces_seules": [k for k in range(len(pieces)) if k not in p_pris]}
+
+
+# =================================================================
+#  5. CATÉGORIE SUGGÉRÉE DES DÉPENSES SANS PIÈCE
+# =================================================================
+# Règles par mots du libellé bancaire (gratuites, sans appel d'IA). Chacune
+# donne le code du plan par défaut et des mots qui reconnaissent le même
+# compte dans un plan importé (QuickBooks, Sage...). À valider par le comptable.
+
+REGLES_CATEGORIES = [
+    (r"esso|petro|shell|ultramar|couche.?tard|irving|husky|pioneer|chevron|essence|gas\b|fuel",
+     "5310", ("carburant", "fuel", "essence", "gas")),
+    (r"tim hortons|starbucks|second cup|mcdonald|subway|restaurant|resto|bistro|caf[eé]\b|"
+     r"uber ?eats|doordash|skip ?the ?dishes|a&w|pizza|sushi|boulangerie|bakery",
+     "5210", ("repas", "meal", "restaurant", "représentation", "entertainment")),
+    (r"frais (mensuels|bancaires|de service)|service charge|monthly fee|account fee|"
+     r"bank fee|interest|int[ée]r[eê]ts|nsf|frais d'utilisation",
+     "5230", ("frais bancaires", "bank charge", "intérêts", "interest")),
+    (r"bell\b|rogers|telus|vid[ée]otron|fido|koodo|virgin|freedom mobile|hydro|"
+     r"enbridge|[ée]nergir|gazifere|internet",
+     "5300", ("télécom", "telephone", "téléphone", "utilities", "services publics", "internet")),
+    (r"google|microsoft|adobe|amazon web|aws|zoom|github|dropbox|shopify|slack|"
+     r"apple\.com|intuit|quickbooks|canva|notion|wix|godaddy|squarespace",
+     "5250", ("logiciel", "software", "abonnement", "subscription")),
+    (r"staples|bureau en gros|best buy|office depot|papeterie|buroplus",
+     "5240", ("fournitures de bureau", "office")),
+    (r"air canada|westjet|porter|via rail|h[oô]tel|airbnb|marriott|hilton|uber(?! ?eats)|"
+     r"lyft|taxi|parking|stationnement|oc transpo|stm\b|presto|opus",
+     "5290", ("déplacement", "travel", "voyage")),
+    (r"postes canada|canada post|purolator|fedex|ups\b|dhl|intelcom",
+     "5340", ("livraison", "delivery", "transport", "freight")),
+    (r"facebook|meta ?ads|google ads|linkedin|instagram|publicit",
+     "5200", ("publicité", "advertising", "marketing")),
+    (r"assurance|insurance|intact|aviva|la capitale|desjardins assurances",
+     "5220", ("assurance", "insurance")),
+    (r"loyer|\brent\b|bail",
+     "5270", ("loyer", "rent")),
+]
+
+
+def categorie_suggeree(description: str, plan: list[dict]) -> str:
+    """« code · compte » du plan pour une dépense sans pièce, ou vide."""
+    desc = (description or "").lower()
+    for motif, code, mots in REGLES_CATEGORIES:
+        if not re.search(motif, desc):
+            continue
+        compte = next((c for c in plan if c.get("code") == code), None) or next(
+            (c for c in plan if any(m in c.get("nom", "").lower() for m in mots)), None)
+        if compte:
+            return f"{compte['code']} · {compte['nom']}" if compte.get("code") \
+                else compte["nom"]
+    return ""

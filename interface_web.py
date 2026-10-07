@@ -129,7 +129,14 @@ _verrou_quota = threading.Lock()
 
 
 def _visiteur(request: Request) -> str:
-    # Derrière le proxy de l'hébergeur, l'IP réelle est dans X-Forwarded-For.
+    # Render est servi derrière Cloudflare, qui écrit lui-même l'IP du client
+    # dans CF-Connecting-IP / True-Client-IP (une valeur envoyée par le client
+    # est écrasée) : on les lit d'abord. X-Forwarded-For, que le client peut
+    # préremplir, ne sert qu'en dernier recours.
+    for entete in ("cf-connecting-ip", "true-client-ip"):
+        ip = (request.headers.get(entete) or "").strip()
+        if ip:
+            return ip
     xff = request.headers.get("x-forwarded-for")
     if xff:
         return xff.split(",")[0].strip()
@@ -641,7 +648,7 @@ const I18N = {
     av_hint:"plan comptable, ajout à un Excel existant, relevé bancaire, export QuickBooks — facultatif",
     releve_btn:"Importer un relevé bancaire", releve_hint:"optionnel — CSV ou OFX de votre banque ; rapproche les transactions de vos factures",
     releve_choisi:"Relevé :", rap_titre:"Relevé bancaire", rap_ok:"transaction(s) rapprochée(s)",
-    rap_sans:"dépense(s) sans pièce", rap_abs:"facture(s) absente(s) du relevé", rap_voir:"détail dans l'onglet Rapprochement",
+    rap_sans:"dépense(s) sans pièce", rap_abs:"facture(s) absente(s) du relevé", rap_voir:"détail dans l'onglet Rapprochement", rap_cat:"catégorie suggérée pour",
     cumul:"Total du fichier", dont_taxes:"dont taxes", nb_fact:"facture(s) depuis le début" },
   en:{ statut_check:"Checking…", statut_on:"Service online", statut_off:"Service unavailable",
     hero1:"Your invoices and receipts,", hero2:"in Excel — from a photo.",
@@ -671,7 +678,7 @@ const I18N = {
     av_hint:"chart of accounts, append to an existing Excel, bank statement, QuickBooks export — optional",
     releve_btn:"Import a bank statement", releve_hint:"optional — CSV or OFX from your bank; matches transactions to your invoices",
     releve_choisi:"Statement:", rap_titre:"Bank statement", rap_ok:"transaction(s) matched",
-    rap_sans:"expense(s) without a receipt", rap_abs:"invoice(s) not on the statement", rap_voir:"details in the Bank reconciliation sheet",
+    rap_sans:"expense(s) without a receipt", rap_abs:"invoice(s) not on the statement", rap_voir:"details in the Bank reconciliation sheet", rap_cat:"suggested category for",
     cumul:"File total", dont_taxes:"incl. tax", nb_fact:"invoice(s) since the start" }
 };
 let LANG = localStorage.getItem('facturo_lang') || (navigator.language||'fr').slice(0,2);
@@ -807,7 +814,7 @@ function afficher(d){
   cumul.innerHTML=tot.map(t=>`Σ ${T('cumul')} : <b>${fmt(t.total_ttc)} ${esc(t.devise)}</b> · ${T('dont_taxes')} ${fmt(t.taxes)} ${esc(t.devise)} · ${t.nb} ${T('nb_fact')}`).join('<br>');
   const rap=d.rapprochement;
   if(rap) cumul.innerHTML+=(tot.length?'<br>':'')+`🏦 ${T('rap_titre')} : <b>${rap.rapprochees}</b> ${T('rap_ok')} · `
-    +`<b>${rap.sans_piece}</b> ${T('rap_sans')} (${fmt(rap.montant_sans_piece)}) · <b>${rap.absentes}</b> ${T('rap_abs')} — ${T('rap_voir')}`;
+    +`<b>${rap.sans_piece}</b> ${T('rap_sans')} (${fmt(rap.montant_sans_piece)}${rap.categorisees?`, ${T('rap_cat')} ${rap.categorisees}`:''}) · <b>${rap.absentes}</b> ${T('rap_abs')} — ${T('rap_voir')}`;
   cumul.classList.toggle('masque',!tot.length&&!rap);
   const q=document.getElementById('telQbo');
   q.classList.toggle('masque',!d.qbo);

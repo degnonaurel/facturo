@@ -143,7 +143,7 @@ def test_onglet_rapprochement_sur_tout_le_classeur(tmp_path):
     assert statuts == ["Rapprochée", "Sans pièce", "Absente du relevé"]
     assert lignes[0][5] == "PG.pdf" and lignes[2][6] == "Bistro du Ruisseau"
     assert bilan == {"transactions": 2, "rapprochees": 1, "sans_piece": 1,
-                     "montant_sans_piece": 60.0, "absentes": 1}
+                     "montant_sans_piece": 60.0, "categorisees": 0, "absentes": 1}
     assert wb["Rapprochement"]["B3"].data_type == "s"     # libellé bancaire = texte
 
 
@@ -207,3 +207,60 @@ def test_web_releve_illisible_et_envoi_vide(monkeypatch):
         ("releve", ("releve.csv", b"rien a voir\n", "text/csv"))]).json()
     assert d["download_id"] is None and "illisible" in d["erreurs"][0]["message"]
     assert client.post("/api/extraire", data={"langue": "fr"}).status_code == 400
+
+
+
+# --- Limites levées : devises, catégories, adresse du visiteur ----------------
+
+def test_facture_usd_payee_en_cad():
+    tr = [rb.Transaction("2026-09-13", "CLOUDNOTE INC SAN FRANCISCO", -40.12),
+          rb.Transaction("2026-09-13", "AUTRE ACHAT", -40.12)]
+    piece = dict(_piece("CloudNote Inc.", "2026-09-12", 29.00), devise="USD")
+    r = rb.rapprocher(tr, [piece])
+    assert r["paires"] == [(0, 0, 1, "converti")]          # le nom confirme
+
+
+def test_conversion_refusee_sans_nom_ou_hors_fourchette():
+    piece = dict(_piece("CloudNote Inc.", "2026-09-12", 29.00), devise="USD")
+    assert rb.rapprocher([rb.Transaction("2026-09-13", "ACHAT WEB", -40.12)],
+                         [piece])["paires"] == []          # pas de nom
+    assert rb.rapprocher([rb.Transaction("2026-09-13", "CLOUDNOTE", -80.00)],
+                         [piece])["paires"] == []          # taux 2,76 : impossible
+
+
+def test_categorie_suggeree_plan_defaut_et_plan_importe():
+    defaut = fve.plan_par_defaut("fr")
+    assert rb.categorie_suggeree("STATION ESSO OTTAWA", defaut) == "5310 · Carburant"
+    assert rb.categorie_suggeree("TIM HORTONS #2231", defaut) == "5210 · Repas et représentation"
+    assert rb.categorie_suggeree("FRAIS MENSUELS COMPTE", defaut).startswith("5230")
+    assert rb.categorie_suggeree("VIREMENT 4471", defaut) == ""
+    qbo = [{"code": "", "nom": "Meals and entertainment", "type": "Expense"},
+           {"code": "", "nom": "Bank charges", "type": "Expense"}]
+    assert rb.categorie_suggeree("Starbucks 0042", qbo) == "Meals and entertainment"
+    assert rb.categorie_suggeree("Esso", qbo) == ""         # pas de compte carburant
+
+
+def test_onglet_categorie_suggeree(tmp_path):
+    f = fve._vers_facture("a.pdf", {"fournisseur": "A", "numero": "1", "date": "2026-09-01",
+                                    "total_ttc": 5.0, "lignes": []}, "t")
+    bilan, sortie = {}, str(tmp_path / "s.xlsx")
+    fve.construire_excel([f], sortie, plan=fve.plan_par_defaut("fr"), bilan=bilan,
+                         releve=[rb.Transaction("2026-09-02", "PETRO-CANADA 123", -50.0)])
+    ligne = list(load_workbook(sortie)["Rapprochement"].iter_rows(min_row=2, values_only=True))[0]
+    assert ligne[4] == "Sans pièce" and ligne[10] == "5310 · Carburant"
+    assert ligne[11] == "Catégorie suggérée" and bilan["categorisees"] == 1
+
+
+def test_visiteur_lu_dans_l_entete_cloudflare():
+    from starlette.requests import Request
+    import interface_web
+
+    def req(**entetes):
+        return Request({"type": "http", "client": ("10.0.0.1", 1), "headers": [
+            (k.replace("_", "-").encode(), v.encode()) for k, v in entetes.items()]})
+    # Cloudflare écrase CF-Connecting-IP : une fausse valeur dans
+    # X-Forwarded-For ne change plus l'identité du visiteur.
+    assert interface_web._visiteur(req(cf_connecting_ip="1.2.3.4",
+                                       x_forwarded_for="9.9.9.9")) == "1.2.3.4"
+    assert interface_web._visiteur(req(x_forwarded_for="5.6.7.8, 10.0.0.2")) == "5.6.7.8"
+    assert interface_web._visiteur(req()) == "10.0.0.1"

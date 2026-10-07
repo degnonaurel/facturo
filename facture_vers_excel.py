@@ -1172,6 +1172,8 @@ _STATUTS = {  # clé : (FR, EN)
     "absente": ("Absente du relevé", "Not on statement"),
     "elevee": ("Élevée", "High"), "moyenne": ("Moyenne", "Medium"),
     "faible": ("Faible", "Low"),
+    "converti": ("Montant converti (à vérifier)", "Converted amount (check)"),
+    "suggeree": ("Catégorie suggérée", "Suggested category"),
 }
 
 
@@ -1214,6 +1216,7 @@ def _ecrire_rapprochement(wb, ws, pos_r, transactions: list, langue: str) -> dic
         if n.strip().lower() in _noms_connus("Rapprochement"):
             wb.remove(wb[n])
     pieces = _pieces_du_resume(ws, pos_r)
+    plan = _plan_de_classeur(wb) or plan_par_defaut(langue)
     res = rb.rapprocher(transactions, pieces)
     facture_de = {i: (k, ecart, conf) for i, k, ecart, conf in res["paires"]}
 
@@ -1223,7 +1226,8 @@ def _ecrire_rapprochement(wb, ws, pos_r, transactions: list, langue: str) -> dic
     wr.append([_titre(c, langue) for c in _COLS_RAPPROCHEMENT])
     _entete(wr, len(_COLS_RAPPROCHEMENT))
     bilan = {"transactions": len(transactions), "rapprochees": 0, "sans_piece": 0,
-             "montant_sans_piece": 0.0, "absentes": len(res["pieces_seules"])}
+             "montant_sans_piece": 0.0, "categorisees": 0,
+             "absentes": len(res["pieces_seules"])}
     ordre = sorted(range(len(transactions)), key=lambda i: transactions[i].date)
     for i in ordre:
         t = transactions[i]
@@ -1236,8 +1240,11 @@ def _ecrire_rapprochement(wb, ws, pos_r, transactions: list, langue: str) -> dic
                       _statut(conf, langue)]
             bilan["rapprochees"] += 1
         elif t.montant < 0:
-            ligne += [_statut("sans_piece", langue)]
+            categorie = rb.categorie_suggeree(t.description, plan)
+            ligne += [_statut("sans_piece", langue)] + [None] * 5 + (
+                [categorie, _statut("suggeree", langue)] if categorie else [])
             bilan["sans_piece"] += 1
+            bilan["categorisees"] += bool(categorie)
             bilan["montant_sans_piece"] += -t.montant
         else:
             ligne += [_statut("entree", langue)]
