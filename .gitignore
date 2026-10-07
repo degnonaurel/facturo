@@ -24,3 +24,6 @@ apercu_*.html
 .DS_Store
 .idea/
 .vscode/
+
+# Coverage report output (pytest-coverage skill)
+cov_annotate/
