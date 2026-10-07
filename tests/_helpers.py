@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Outils partagés par les tests : rendent la racine importable et
 génèrent des entrées de test (PDF texte, image de reçu) à la volée."""
-import os
 import sys
 from pathlib import Path
 

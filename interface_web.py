@@ -588,7 +588,7 @@ _PAGE = r"""<!DOCTYPE html>
       <div class="etapes">
         <div class="etape"><div class="n">1</div><div><b data-i18n="e1t">Déposez</b><span data-i18n="e1d">Photo ou PDF, en lot.</span></div></div>
         <div class="etape"><div class="n">2</div><div><b data-i18n="e2t">On lit tout</b><span data-i18n="e2d">Fournisseur, dates, taxes, lignes.</span></div></div>
-        <div class="etape"><div class="n">3</div><div><b data-i18n="e3t">Téléchargez</b><span data-i18n="e3d">Un Excel propre, deux feuilles.</span></div></div>
+        <div class="etape"><div class="n">3</div><div><b data-i18n="e3t">Téléchargez</b><span data-i18n="e3d">Un Excel propre, prêt pour la compta.</span></div></div>
       </div>
     </div>
 

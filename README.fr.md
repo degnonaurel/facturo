@@ -2,13 +2,18 @@
 
 [English](README.md) · **Français**
 
+[![CI](https://github.com/degnonaurel/facturo/actions/workflows/ci.yml/badge.svg)](https://github.com/degnonaurel/facturo/actions/workflows/ci.yml)
+
 **▶ Démo en ligne : [facturo-ow5a.onrender.com](https://facturo-ow5a.onrender.com)** — application bilingue, français et anglais
 <sub>Hébergement gratuit : le premier chargement peut prendre jusqu'à une minute. Démo limitée à 10 fichiers par jour et par visiteur.</sub>
 
 Facturo lit vos **factures et reçus** (photos ou PDF, en français ou en anglais)
-et les exporte dans un **Excel propre** à deux feuilles : `Resume` (une ligne
-par pièce) et `Details` (les lignes de facture). Interface web glisser-déposer
-avec bascule **FR/EN** en un clic, plus un outil en ligne de commande.
+et les exporte dans un **Excel propre** : `Resume` (une ligne par pièce),
+`Details` (les lignes de facture), totaux par compte et plan comptable. Les
+comptables peuvent aller plus loin : ajout à un classeur existant,
+rapprochement d'un relevé bancaire, export vers QuickBooks Online. Interface
+web glisser-déposer avec bascule **FR/EN** en un clic, plus un outil en ligne
+de commande.
 
 <p align="center">
   <img src="exemples/apercu_facturo_fr.png" alt="Interface Facturo en français" width="49%">
@@ -112,6 +117,7 @@ facturo/
 ├── interface_web.py        # app web FastAPI (bilingue FR/EN)
 ├── releves_bancaires.py    # relevés bancaires (CSV/OFX) + rapprochement
 ├── requirements.txt
+├── pyproject.toml          # configuration pytest + ruff
 ├── Dockerfile              # image de déploiement
 ├── LICENSE
 ├── tests/                  # suite de tests autonome (pytest)
@@ -126,7 +132,19 @@ pytest -q
 ```
 
 Les tests sont autonomes (ils génèrent leurs propres entrées et simulent le
-LLM) : aucun appel réseau, aucune clé requise.
+LLM) : aucun appel réseau, aucune clé requise. L'intégration continue lance le
+linter (`ruff`) et toute la suite sur Python 3.11 à 3.13 à chaque push et
+pull request.
+
+## Méthode de développement
+
+Facturo est développé avec un flux assisté par IA, via
+[Claude Code](https://claude.com/claude-code). [`CLAUDE.md`](CLAUDE.md) donne à
+l'agent l'architecture, les conventions et le niveau d'exigence ; des skills de
+projet dans [`.claude/skills/`](.claude/skills/) couvrent le durcissement de la
+sécurité et la couverture de tests. Chaque changement passe par les mêmes
+contrôles qu'un code écrit à la main : tests, linter et intégration continue,
+plus une revue de sécurité pour tout ce qui touche aux entrées utilisateur.
 
 ## Sécurité
 

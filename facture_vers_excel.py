@@ -1106,7 +1106,7 @@ def _repartition_categories(ws, pos_r, wd, pos_d, langue: str) -> list[dict]:
 
     groupes: dict[tuple, dict] = {}
     for r in range(2, ws.max_row + 1):
-        val = lambda cle: ws.cell(row=r, column=pos_r[cle]).value
+        val = lambda cle, r=r: ws.cell(row=r, column=pos_r[cle]).value  # noqa: E731
         if val("Fichier") is None or _est_ligne_total(val("Fichier")):
             continue
         cat_piece = val("Catégorie") or sans
@@ -1150,7 +1150,6 @@ def _ecrire_totaux_categories(wb, ws, pos_r, wd, pos_d, langue: str) -> None:
     for g in groupes:
         wt.append([g["categorie"], g["devise"] or None, g["nb"]] + [g[c] for c in champs])
     # Une ligne TOTAL par devise (les mêmes montants que le résumé).
-    mot = "invoice(s)" if langue == "en" else "facture(s)"
     for t in _calculer_totaux(ws, pos_r):
         wt.append([f"TOTAL {t['devise']}".strip(), t["devise"] or None, t["nb"]]
                   + [t[c] for c in ("total_ht", "tps", "tvq", "taxes", "total_ttc")])
@@ -1193,7 +1192,7 @@ def _pieces_du_resume(ws, pos_r) -> list[dict]:
     import releves_bancaires as rb
     pieces = []
     for r in range(2, ws.max_row + 1):
-        val = lambda cle: ws.cell(row=r, column=pos_r[cle]).value
+        val = lambda cle, r=r: ws.cell(row=r, column=pos_r[cle]).value  # noqa: E731
         if val("Fichier") is None or _est_ligne_total(val("Fichier")):
             continue
         d = val("Date")

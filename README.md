@@ -2,13 +2,17 @@
 
 **English** · [Français](README.fr.md)
 
+[![CI](https://github.com/degnonaurel/facturo/actions/workflows/ci.yml/badge.svg)](https://github.com/degnonaurel/facturo/actions/workflows/ci.yml)
+
 **▶ Live demo: [facturo-ow5a.onrender.com](https://facturo-ow5a.onrender.com)** — bilingual app, English & French
 <sub>Free hosting: the first load may take up to a minute. Demo limited to 10 files per day per visitor.</sub>
 
 Facturo reads **invoices and receipts** (photos or PDFs, in English or French)
-and exports them to a **clean Excel workbook** with two sheets: `Summary`
-(one row per document) and `Details` (line items). Drag-and-drop web app with
-a one-click **EN/FR** language switch, plus a command-line tool.
+and exports them to a **clean Excel workbook**: `Summary` (one row per
+document), `Details` (line items), totals by account and the chart of accounts.
+Accountants can go further — append to an existing workbook, reconcile a bank
+statement, export to QuickBooks Online. Drag-and-drop web app with a one-click
+**EN/FR** language switch, plus a command-line tool.
 
 <p align="center">
   <img src="exemples/apercu_facturo_en.png" alt="Facturo interface in English" width="49%">
@@ -108,6 +112,7 @@ facturo/
 ├── interface_web.py        # FastAPI web app (bilingual EN/FR)
 ├── releves_bancaires.py    # bank statements (CSV/OFX) + reconciliation
 ├── requirements.txt
+├── pyproject.toml          # pytest + ruff configuration
 ├── Dockerfile              # deployment image
 ├── LICENSE
 ├── tests/                  # self-contained test suite (pytest)
@@ -125,7 +130,17 @@ pytest -q
 ```
 
 The tests are self-contained (they generate their own inputs and mock the LLM):
-no network calls, no API key required.
+no network calls, no API key required. CI runs lint (`ruff`) and the full suite
+on Python 3.11 to 3.13 for every push and pull request.
+
+## Development workflow
+
+Facturo is built with an AI-assisted workflow using
+[Claude Code](https://claude.com/claude-code). [`CLAUDE.md`](CLAUDE.md) gives the
+agent the architecture, conventions and quality bar; project skills in
+[`.claude/skills/`](.claude/skills/) cover security hardening and test coverage.
+Every change goes through the same gates as hand-written code: tests, lint and
+CI, plus a security review for anything touching user input.
 
 ## Security
 
