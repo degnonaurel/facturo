@@ -44,7 +44,8 @@ pytest · Docker · déploiement continu sur Render.
 
 Catégories et totaux sont toujours dans l'Excel, sur des onglets après le
 résumé : un usager courant peut les ignorer. L'import d'un plan comptable,
-l'ajout à un fichier existant et l'export QuickBooks se trouvent dans le
+l'ajout à un fichier existant, le relevé bancaire et l'export QuickBooks se
+trouvent dans le
 panneau replié *Options pour comptables* de l'app web.
 
 - **Ajout à un Excel existant** — les nouvelles lignes s'ajoutent à la fin,
@@ -61,6 +62,14 @@ panneau replié *Options pour comptables* de l'app web.
 - **Totaux cumulés** — une ligne TOTAL par devise en bas du résumé (nombre de
   factures, HT, TPS, TVQ, taxes, TTC), recalculée à chaque ajout ; l'app web
   affiche aussi le total cumulé du fichier.
+- **Rapprochement bancaire** — importez l'export CSV ou OFX/QFX de la banque
+  (titres en français ou en anglais, montant signé ou colonnes débit / crédit,
+  tous les formats de date courants) : chaque facture du classeur est associée
+  à un débit de même montant à une date plausible, le nom du fournisseur dans
+  le libellé bancaire départageant les cas douteux. Un onglet *Rapprochement*
+  liste les transactions rapprochées, les **dépenses sans pièce** (surlignées)
+  et les factures absentes du relevé. Fonctionne aussi avec un relevé seul sur
+  un classeur existant. Exemple : [`exemples/releves/`](exemples/releves/).
 - **Export QuickBooks Online** (sur demande) — cochez *Préparer aussi un
   fichier d'import QuickBooks Online* (ou `--qbo` en ligne de commande) pour
   obtenir, **en plus** de l'Excel inchangé, un CSV au format d'import de factures
@@ -87,6 +96,7 @@ python interface_web.py
 python facture_vers_excel.py exemples/factures_demo/*.pdf -o sortie.xlsx
 python facture_vers_excel.py recu.heic --ajouter-a ma_compta.xlsx -o ma_compta.xlsx
 python facture_vers_excel.py *.pdf --plan comptes_qbo.xlsx -o sortie.xlsx --qbo factures_qbo.csv
+python facture_vers_excel.py --ajouter-a ma_compta.xlsx --releve releve.csv -o ma_compta.xlsx
 ```
 
 Sans clé API, le mode hors ligne fonctionne uniquement sur les PDF texte :
@@ -98,6 +108,7 @@ Sans clé API, le mode hors ligne fonctionne uniquement sur les PDF texte :
 facturo/
 ├── facture_vers_excel.py   # moteur : extraction (PDF/vision) + Excel + CLI
 ├── interface_web.py        # app web FastAPI (bilingue FR/EN)
+├── releves_bancaires.py    # relevés bancaires (CSV/OFX) + rapprochement
 ├── requirements.txt
 ├── Dockerfile              # image de déploiement
 ├── LICENSE

@@ -43,7 +43,7 @@ continuous deployment on Render.
 
 Categories and totals are always in the Excel, on sheets after the summary, so
 everyday users can ignore them. Importing a chart of accounts, appending to an
-existing file and the QuickBooks export sit in the collapsed *Options for
+existing file, the bank statement and the QuickBooks export sit in the collapsed *Options for
 accountants* panel of the web app.
 
 - **Append to an existing Excel file** — new rows are added at the end, nothing
@@ -59,6 +59,14 @@ accountants* panel of the web app.
 - **Running totals** — a TOTAL row per currency at the bottom of the summary
   (invoice count, subtotal, GST, QST, tax, total), recalculated on every append;
   the web app also shows the cumulative file total.
+- **Bank statement reconciliation** — import the bank's CSV or OFX/QFX export
+  (headers in English or French, signed amounts or debit/credit columns, every
+  common date format): each invoice of the workbook is matched to a debit of
+  the same amount at a plausible date, the supplier name in the bank label
+  breaking ties. A *Bank reconciliation* sheet lists matched transactions,
+  **expenses without a receipt** (highlighted) and invoices missing from the
+  statement. Works with a statement alone on an existing workbook. Sample:
+  [`exemples/releves/`](exemples/releves/).
 - **QuickBooks Online export** (opt-in) — tick *Also prepare a QuickBooks Online
   import file* (or `--qbo` on the command line) to get, **in addition to** the
   unchanged Excel file, a CSV in the QuickBooks Online Canada bill import format
@@ -84,6 +92,7 @@ python interface_web.py
 python facture_vers_excel.py exemples/factures_demo/*.pdf -o output.xlsx
 python facture_vers_excel.py receipt.heic --ajouter-a my_books.xlsx -o my_books.xlsx
 python facture_vers_excel.py *.pdf --plan qbo_accounts.xlsx -o output.xlsx --qbo bills_qbo.csv
+python facture_vers_excel.py --ajouter-a my_books.xlsx --releve statement.csv -o my_books.xlsx
 ```
 
 Without an API key, offline mode only works on text PDFs: `--moteur tables`.
@@ -94,6 +103,7 @@ Without an API key, offline mode only works on text PDFs: `--moteur tables`.
 facturo/
 ├── facture_vers_excel.py   # engine: extraction (PDF/vision) + Excel + CLI
 ├── interface_web.py        # FastAPI web app (bilingual EN/FR)
+├── releves_bancaires.py    # bank statements (CSV/OFX) + reconciliation
 ├── requirements.txt
 ├── Dockerfile              # deployment image
 ├── LICENSE

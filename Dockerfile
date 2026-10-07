@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY facture_vers_excel.py interface_web.py ./
+COPY facture_vers_excel.py interface_web.py releves_bancaires.py ./
 
 # Le port par défaut de Hugging Face Spaces est 7860 ; Render fournit $PORT.
 ENV PORT=7860

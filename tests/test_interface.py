@@ -104,3 +104,12 @@ def test_statut_quota_et_contact(tmp_path, monkeypatch):
     assert d["restant"] == interface_web.QUOTA_JOUR_VISITEUR - 1
     page = client.get("/").text
     assert 'id="offre"' in page and "Facturo Pro" in page
+
+
+def test_dockerfile_copie_tous_les_modules():
+    """L'image de déploiement contient chaque module Python de la racine
+    (sinon la démo plante au démarrage)."""
+    import re
+    copie = " ".join(re.findall(r"^COPY (.+)$", (RACINE / "Dockerfile").read_text(), re.M))
+    for module in RACINE.glob("*.py"):
+        assert module.name in copie, f"{module.name} absent du Dockerfile"

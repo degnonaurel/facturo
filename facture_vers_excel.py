@@ -873,6 +873,9 @@ _EN = {
     "Catégorie": "Category", "Plan comptable": "Chart of accounts",
     "Totaux par catégorie": "Totals by category", "Nb factures": "Invoices",
     "Code": "Code", "Compte": "Account", "Type": "Type",
+    "Rapprochement": "Bank reconciliation", "Statut": "Status",
+    "Date facture": "Invoice date", "Écart (jours)": "Gap (days)",
+    "Confiance": "Confidence",
 }
 
 # Autres titres acceptés pour une colonne, quand on ajoute à un classeur
@@ -889,6 +892,7 @@ _SYNONYMES = {
     "Catégorie": ["categorie", "catégorie comptable", "compte comptable"],
     "Plan comptable": ["plan", "accounts", "coa"],
     "Totaux par catégorie": ["totaux categories", "category totals"],
+    "Rapprochement": ["rapprochement bancaire", "reconciliation", "bank rec"],
 }
 
 
@@ -1158,9 +1162,108 @@ def _ecrire_totaux_categories(wb, ws, pos_r, wd, pos_d, langue: str) -> None:
     _largeurs(wt)
 
 
+_COLS_RAPPROCHEMENT = ["Date", "Description", "Montant", "Devise", "Statut",
+                       "Fichier", "Fournisseur", "N°", "Date facture",
+                       "Écart (jours)", "Catégorie", "Confiance"]
+_STATUTS = {  # clé : (FR, EN)
+    "rapprochee": ("Rapprochée", "Matched"),
+    "sans_piece": ("Sans pièce", "No receipt"),
+    "entree": ("Entrée d'argent", "Money in"),
+    "absente": ("Absente du relevé", "Not on statement"),
+    "elevee": ("Élevée", "High"), "moyenne": ("Moyenne", "Medium"),
+    "faible": ("Faible", "Low"),
+}
+
+
+def _statut(cle: str, langue: str) -> str:
+    return _STATUTS[cle][1 if langue == "en" else 0]
+
+
+def _texte_seulement(ws, r: int) -> None:
+    """Ligne écrite à partir de données externes : aucune cellule formule."""
+    for cell in ws[r]:
+        if cell.data_type == "f":
+            cell.data_type = "s"
+
+
+def _pieces_du_resume(ws, pos_r) -> list[dict]:
+    """Pièces de tout le classeur (lignes du résumé, hors TOTAL)."""
+    import releves_bancaires as rb
+    pieces = []
+    for r in range(2, ws.max_row + 1):
+        val = lambda cle: ws.cell(row=r, column=pos_r[cle]).value
+        if val("Fichier") is None or _est_ligne_total(val("Fichier")):
+            continue
+        d = val("Date")
+        d = d.date().isoformat() if hasattr(d, "date") else rb.lire_date(d, "jm")
+        pieces.append({"fichier": val("Fichier"), "fournisseur": str(val("Fournisseur") or ""),
+                       "numero": val("N°"), "date": d,
+                       "devise": normaliser_devise(val("Devise")),
+                       "total_ttc": val("Total TTC"), "categorie": val("Catégorie")})
+    return pieces
+
+
+def _ecrire_rapprochement(wb, ws, pos_r, transactions: list, langue: str) -> dict:
+    """
+    (Ré)écrit l'onglet « Rapprochement » : chaque transaction du relevé avec
+    sa facture quand on la trouve, les dépenses sans pièce (surlignées) et
+    les factures du classeur absentes du relevé. Renvoie un bilan chiffré.
+    """
+    import releves_bancaires as rb
+    for n in list(wb.sheetnames):
+        if n.strip().lower() in _noms_connus("Rapprochement"):
+            wb.remove(wb[n])
+    pieces = _pieces_du_resume(ws, pos_r)
+    res = rb.rapprocher(transactions, pieces)
+    facture_de = {i: (k, ecart, conf) for i, k, ecart, conf in res["paires"]}
+
+    plan_ws = _feuille_plan(wb)
+    index = wb.sheetnames.index(plan_ws.title) if plan_ws is not None else len(wb.sheetnames)
+    wr = wb.create_sheet(_titre("Rapprochement", langue), index=index)
+    wr.append([_titre(c, langue) for c in _COLS_RAPPROCHEMENT])
+    _entete(wr, len(_COLS_RAPPROCHEMENT))
+    bilan = {"transactions": len(transactions), "rapprochees": 0, "sans_piece": 0,
+             "montant_sans_piece": 0.0, "absentes": len(res["pieces_seules"])}
+    ordre = sorted(range(len(transactions)), key=lambda i: transactions[i].date)
+    for i in ordre:
+        t = transactions[i]
+        ligne = [t.date, t.description, t.montant, t.devise or None]
+        if i in facture_de:
+            k, ecart, conf = facture_de[i]
+            p = pieces[k]
+            ligne += [_statut("rapprochee", langue), p["fichier"], p["fournisseur"],
+                      p["numero"], p["date"] or None, ecart, p["categorie"],
+                      _statut(conf, langue)]
+            bilan["rapprochees"] += 1
+        elif t.montant < 0:
+            ligne += [_statut("sans_piece", langue)]
+            bilan["sans_piece"] += 1
+            bilan["montant_sans_piece"] += -t.montant
+        else:
+            ligne += [_statut("entree", langue)]
+        wr.append(ligne)
+        _texte_seulement(wr, wr.max_row)
+        if i not in facture_de and t.montant < 0:
+            for cell in wr[wr.max_row]:
+                cell.fill = _ALERTE
+    for k in res["pieces_seules"]:
+        p = pieces[k]
+        wr.append([None, None, None, p["devise"] or None, _statut("absente", langue),
+                   p["fichier"], p["fournisseur"], p["numero"], p["date"] or None,
+                   None, p["categorie"]])
+        _texte_seulement(wr, wr.max_row)
+    for row in wr.iter_rows(min_row=2, min_col=3, max_col=3):
+        row[0].number_format = _MON
+    bilan["montant_sans_piece"] = round(bilan["montant_sans_piece"], 2)
+    _largeurs(wr)
+    return bilan
+
+
 def construire_excel(factures: list[Facture], chemin_sortie: str,
                      base_excel: Optional[str] = None, langue: str = "fr",
-                     plan: Optional[list[dict]] = None) -> str:
+                     plan: Optional[list[dict]] = None,
+                     releve: Optional[list] = None,
+                     bilan: Optional[dict] = None) -> str:
     """
     Écrit les factures dans un classeur Excel, titres dans `langue` (« fr »
     ou « en »). Si `base_excel` pointe vers un classeur existant, les nouvelles
@@ -1169,6 +1272,9 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
     Sinon un nouveau classeur est créé. Le `plan` comptable (sinon celui déjà
     enregistré dans le classeur) est écrit dans un onglet dédié et proposé en
     liste déroulante dans la colonne Catégorie.
+    Avec un `releve` (transactions lues par releves_bancaires), l'onglet
+    « Rapprochement » est (re)construit à partir de TOUTES les pièces du
+    classeur ; son bilan chiffré est copié dans le dict `bilan` s'il est fourni.
     """
     if base_excel and os.path.isfile(base_excel):
         from openpyxl import load_workbook
@@ -1223,6 +1329,11 @@ def construire_excel(factures: list[Facture], chemin_sortie: str,
 
     # Après l'écriture du résumé ET des articles (base de la répartition).
     _ecrire_totaux_categories(wb, ws, pos_r, wd, pos_d, langue)
+
+    if releve is not None:
+        resultat = _ecrire_rapprochement(wb, ws, pos_r, releve, langue)
+        if bilan is not None:
+            bilan.update(resultat)
 
     wb.save(chemin_sortie)
     return chemin_sortie
@@ -1368,7 +1479,7 @@ def construire_csv_qbo(factures: list[Facture], chemin_sortie: str,
 def _parseur():
     p = argparse.ArgumentParser(
         description="Factures/reçus (PDF ou PHOTO) -> Excel. Extraction LLM (V2.1).")
-    p.add_argument("fichiers", nargs="+",
+    p.add_argument("fichiers", nargs="*",
                    help="PDF et/ou images (.jpg .png .heic .webp ...).")
     p.add_argument("-o", "--sortie", default="factures.xlsx")
     p.add_argument("--ajouter-a", default=None, metavar="EXISTANT.xlsx",
@@ -1388,6 +1499,8 @@ def _parseur():
     p.add_argument("--qbo", default=None, metavar="FACTURES_QBO.csv",
                    help="Écrit aussi le CSV d'import de factures fournisseurs "
                         "de QuickBooks Online (Canada).")
+    p.add_argument("--releve", default=None, metavar="RELEVE.csv|ofx",
+                   help="Relevé bancaire à rapprocher des factures du classeur.")
     p.add_argument("--json", action="store_true")
     return p
 
@@ -1422,7 +1535,14 @@ def main(argv=None):
         if args.json:
             print(json.dumps(asdict(f), ensure_ascii=False, indent=2))
 
-    if not factures:
+    releve = None
+    if args.releve:
+        import releves_bancaires as rb
+        try:
+            releve = rb.lire_releve(args.releve)
+        except (OSError, rb.ErreurReleve) as e:
+            print(f"  ✗ Relevé illisible : {e}", file=sys.stderr)
+    if not factures and releve is None:
         print("Aucune facture traitée.", file=sys.stderr)
         return 1
     avant = len(factures)
@@ -1431,10 +1551,16 @@ def main(argv=None):
         print(f"  ⓘ {avant - len(factures)} pièce(s) regroupée(s) (même achat).",
               file=sys.stderr)
     base = getattr(args, "ajouter_a", None)
+    bilan: dict = {}
     chemin = construire_excel(factures, args.sortie, base_excel=base,
-                              langue=args.langue, plan=plan)
+                              langue=args.langue, plan=plan, releve=releve, bilan=bilan)
     suffixe = f" (ajoutées à {os.path.basename(base)})" if base else ""
     print(f"\n✓ {len(factures)} facture(s) -> {chemin}{suffixe}", file=sys.stderr)
+    if bilan:
+        print(f"✓ Relevé : {bilan['rapprochees']} rapprochée(s), "
+              f"{bilan['sans_piece']} dépense(s) sans pièce "
+              f"({bilan['montant_sans_piece']:.2f}), {bilan['absentes']} facture(s) "
+              "absente(s) du relevé", file=sys.stderr)
     if args.qbo:
         construire_csv_qbo(factures, args.qbo, plan=plan)
         print(f"✓ Import QuickBooks Online -> {args.qbo}", file=sys.stderr)

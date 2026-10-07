@@ -36,6 +36,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from starlette.concurrency import run_in_threadpool
 
 import facture_vers_excel as fve
+import releves_bancaires as rb
 
 app = FastAPI(title="Facturo")
 _journal = logging.getLogger("facturo")
@@ -96,6 +97,10 @@ _MESSAGES = {
                 "en": "Reading service temporarily unavailable, please try again later"},
     "illisible": {"fr": "Fichier illisible ou format non pris en charge",
                   "en": "Unreadable file or unsupported format"},
+    "rien": {"fr": "Ajoutez au moins une facture ou un relevé bancaire",
+             "en": "Add at least one invoice or a bank statement"},
+    "releve": {"fr": "Relevé bancaire illisible (formats acceptés : CSV, OFX, QFX)",
+               "en": "Unreadable bank statement (accepted formats: CSV, OFX, QFX)"},
     "trop_de_fichiers": {"fr": "Trop de fichiers dans un même envoi (max {n})",
                          "en": "Too many files in one upload (max {n})"},
 }
@@ -165,14 +170,21 @@ def statut(request: Request):
 
 @app.post("/api/extraire")
 async def extraire(request: Request,
-                   fichiers: list[UploadFile] = File(...),
+                   fichiers: Optional[list[UploadFile]] = File(None),
                    base: Optional[UploadFile] = File(None),
                    plan: Optional[UploadFile] = File(None),
+                   releve: Optional[UploadFile] = File(None),
                    langue: str = Form("fr"),
                    qbo: str = Form("")):
     langue = "en" if langue == "en" else "fr"
     veut_qbo = qbo in ("1", "true", "on")
     _purger_telechargements()
+    fichiers = [f for f in (fichiers or []) if f.filename]
+    if releve is not None and not releve.filename:
+        releve = None
+    if not fichiers and releve is None:
+        return JSONResponse({"erreurs": [{"fichier": "", "message":
+                             _message("rien", langue)}]}, status_code=400)
     if len(fichiers) > MAX_FICHIERS_REQUETE:
         return JSONResponse({"erreurs": [{"fichier": "", "message":
                              _message("trop_de_fichiers", langue)}]}, status_code=413)
@@ -248,16 +260,37 @@ async def extraire(request: Request,
                 res.fichier = up.filename or res.fichier
                 factures.append(res)
 
-        if not factures:
+        # Relevé bancaire optionnel : rapproché de toutes les pièces du classeur.
+        transactions = None
+        if releve is not None:
+            contenu = await _lire_limite(releve)
+            ext = os.path.splitext(releve.filename)[1].lower()
+            if contenu is None:
+                erreurs.append({"fichier": releve.filename,
+                                "message": _message("trop_gros", langue)})
+            else:
+                chemin_releve = os.path.join(
+                    tmp, "releve" + (ext if ext in (".csv", ".ofx", ".qfx", ".txt") else ".csv"))
+                with open(chemin_releve, "wb") as f:
+                    f.write(contenu)
+                try:
+                    transactions = rb.lire_releve(chemin_releve)
+                except Exception:
+                    _journal.warning("Relevé illisible", exc_info=True)
+                    erreurs.append({"fichier": releve.filename,
+                                    "message": _message("releve", langue)})
+
+        if not factures and transactions is None:
             return JSONResponse({"factures": [], "erreurs": erreurs,
                                  "download_id": None, "ajoute": bool(base_path)})
 
         factures = fve.regrouper_factures(factures)
+        bilan: dict = {}
         jeton = uuid.uuid4().hex
         chemin = os.path.join(_DOSSIER, f"facturo_{jeton}.xlsx")
         try:
             fve.construire_excel(factures, chemin, base_excel=base_path, langue=langue,
-                                 plan=plan_comptable)
+                                 plan=plan_comptable, releve=transactions, bilan=bilan)
         except Exception:
             # Excel de base illisible : on repart sur un fichier neuf.
             _journal.warning("Excel de base illisible", exc_info=True)
@@ -265,13 +298,14 @@ async def extraire(request: Request,
                             "message": ("Existing Excel unreadable, new file created"
                                         if langue == "en" else
                                         "Excel existant illisible, nouveau fichier créé")})
-            fve.construire_excel(factures, chemin, langue=langue, plan=plan_comptable)
+            fve.construire_excel(factures, chemin, langue=langue, plan=plan_comptable,
+                                 releve=transactions, bilan=bilan)
         _TELECHARGEMENTS[jeton] = (chemin, time.time())
         # CSV QuickBooks Online, en option et en plus de l'Excel (jamais à sa
         # place) : seulement les pièces de cet envoi, pour ne pas importer de
         # doublons quand on ajoute à un Excel existant.
         qbo_pret = False
-        if veut_qbo:
+        if veut_qbo and factures:
             try:
                 fve.construire_csv_qbo(factures, chemin[:-5] + "_qbo.csv",
                                        plan=plan_comptable)
@@ -295,6 +329,7 @@ async def extraire(request: Request,
     } for f in factures]
     return {"factures": resume, "erreurs": erreurs, "download_id": jeton,
             "ajoute": bool(base_path), "totaux_fichier": totaux, "qbo": qbo_pret,
+            "rapprochement": bilan or None,
             "restant": _restant(_visiteur(request))}
 
 
@@ -504,7 +539,7 @@ _PAGE = r"""<!DOCTYPE html>
 
       <details id="avance" class="avance">
         <summary><span data-i18n="av_titre">Options pour comptables</span>
-          <span class="base-hint" data-i18n="av_hint">plan comptable, ajout à un Excel existant, export QuickBooks — facultatif</span></summary>
+          <span class="base-hint" data-i18n="av_hint">plan comptable, ajout à un Excel existant, relevé bancaire, export QuickBooks — facultatif</span></summary>
       <div class="base-zone">
         <label class="base-btn">
           <input id="baseInput" type="file" accept=".xlsx" class="masque">
@@ -520,6 +555,14 @@ _PAGE = r"""<!DOCTYPE html>
         </label>
         <span class="base-hint" data-i18n="plan_hint">optionnel — Excel ou CSV ; sinon un plan standard est utilisé pour catégoriser</span>
         <div id="planNom" class="base-nom masque"></div>
+      </div>
+      <div class="base-zone">
+        <label class="base-btn">
+          <input id="releveInput" type="file" accept=".csv,.ofx,.qfx" class="masque">
+          <span>＋ <span data-i18n="releve_btn">Importer un relevé bancaire</span></span>
+        </label>
+        <span class="base-hint" data-i18n="releve_hint">optionnel — CSV ou OFX de votre banque ; rapproche les transactions de vos factures</span>
+        <div id="releveNom" class="base-nom masque"></div>
       </div>
       <label class="coche">
         <input id="qboInput" type="checkbox">
@@ -579,7 +622,7 @@ const I18N = {
     e3t:"Téléchargez", e3d:"Un Excel propre, prêt pour la compta.",
     base_btn:"Ajouter à un Excel existant", base_hint:"optionnel — les nouvelles lignes s'ajoutent à la fin de votre fichier",
     base_choisi:"Excel de base :", ajoute_note:"Nouvelles lignes ajoutées à votre fichier.",
-    av_titre:"Options pour comptables", av_hint:"plan comptable, ajout à un Excel existant, export QuickBooks — facultatif",
+    av_titre:"Options pour comptables",
     qbo_coche:"Préparer aussi un fichier d'import QuickBooks Online",
     qbo_hint:"CSV de factures fournisseurs, en plus de l'Excel — pour ne plus ressaisir vos pièces à la main",
     res:"Résultat", tel:"Télécharger l'Excel", tel_qbo:"CSV QuickBooks Online",
@@ -595,6 +638,10 @@ const I18N = {
     mail_corps:"Bonjour,\n\nJ'ai essayé Facturo et j'aimerais en savoir plus sur une version adaptée à mon entreprise.\n\nEntreprise :\nVolume approximatif (factures par mois) :\nLogiciel comptable utilisé :\n\nMerci !",
     plan_btn:"Importer mon plan comptable", plan_hint:"optionnel — Excel ou CSV ; sinon un plan standard est utilisé pour catégoriser",
     plan_choisi:"Plan comptable :", th_cat:"Catégorie",
+    av_hint:"plan comptable, ajout à un Excel existant, relevé bancaire, export QuickBooks — facultatif",
+    releve_btn:"Importer un relevé bancaire", releve_hint:"optionnel — CSV ou OFX de votre banque ; rapproche les transactions de vos factures",
+    releve_choisi:"Relevé :", rap_titre:"Relevé bancaire", rap_ok:"transaction(s) rapprochée(s)",
+    rap_sans:"dépense(s) sans pièce", rap_abs:"facture(s) absente(s) du relevé", rap_voir:"détail dans l'onglet Rapprochement",
     cumul:"Total du fichier", dont_taxes:"dont taxes", nb_fact:"facture(s) depuis le début" },
   en:{ statut_check:"Checking…", statut_on:"Service online", statut_off:"Service unavailable",
     hero1:"Your invoices and receipts,", hero2:"in Excel — from a photo.",
@@ -605,7 +652,7 @@ const I18N = {
     e3t:"Download", e3d:"A clean Excel, ready for your books.",
     base_btn:"Add to an existing Excel", base_hint:"optional — new rows are appended to the end of your file",
     base_choisi:"Base Excel:", ajoute_note:"New rows appended to your file.",
-    av_titre:"Options for accountants", av_hint:"chart of accounts, append to an existing Excel, QuickBooks export — optional",
+    av_titre:"Options for accountants",
     qbo_coche:"Also prepare a QuickBooks Online import file",
     qbo_hint:"Bills CSV, in addition to the Excel — no more re-keying your receipts by hand",
     res:"Result", tel:"Download the Excel", tel_qbo:"QuickBooks Online CSV",
@@ -621,6 +668,10 @@ const I18N = {
     mail_corps:"Hello,\n\nI tried Facturo and would like to learn more about a version tailored to my business.\n\nCompany:\nApproximate volume (invoices per month):\nAccounting software used:\n\nThank you!",
     plan_btn:"Import my chart of accounts", plan_hint:"optional — Excel or CSV; otherwise a standard chart is used to categorize",
     plan_choisi:"Chart of accounts:", th_cat:"Category",
+    av_hint:"chart of accounts, append to an existing Excel, bank statement, QuickBooks export — optional",
+    releve_btn:"Import a bank statement", releve_hint:"optional — CSV or OFX from your bank; matches transactions to your invoices",
+    releve_choisi:"Statement:", rap_titre:"Bank statement", rap_ok:"transaction(s) matched",
+    rap_sans:"expense(s) without a receipt", rap_abs:"invoice(s) not on the statement", rap_voir:"details in the Bank reconciliation sheet",
     cumul:"File total", dont_taxes:"incl. tax", nb_fact:"invoice(s) since the start" }
 };
 let LANG = localStorage.getItem('facturo_lang') || (navigator.language||'fr').slice(0,2);
@@ -636,7 +687,7 @@ function setLang(l){
   document.getElementById('fr').classList.toggle('actif',l==='fr');
   document.getElementById('en').classList.toggle('actif',l==='en');
   document.querySelectorAll('[data-i18n]').forEach(e=>{const k=e.getAttribute('data-i18n');if(I18N[l][k])e.textContent=I18N[l][k];});
-  majStatut(); rendreBase(); rendrePlan(); if(typeof majOffre==='function') majOffre(); if(dernier) afficher(dernier);
+  majStatut(); rendreBase(); rendrePlan(); rendreReleve(); if(typeof majOffre==='function') majOffre(); if(dernier) afficher(dernier);
 }
 
 const input=document.getElementById('input'), zone=document.getElementById('zone'),
@@ -691,6 +742,16 @@ function rendrePlan(){
   planNom.innerHTML=`<span>🗂️</span><span>${T('plan_choisi')} ${esc(planFichier.name)}</span><span class="x" title="✕">✕</span>`;
   planNom.querySelector('.x').onclick=()=>{planFichier=null;planInput.value='';rendrePlan();};
 }
+let releveFichier=null;
+const releveInput=document.getElementById('releveInput'), releveNom=document.getElementById('releveNom');
+releveInput.addEventListener('change',()=>{ if(releveInput.files[0]){releveFichier=releveInput.files[0];rendreReleve();} });
+function rendreReleve(){
+  btn.disabled=!fichiers.length&&!releveFichier;
+  if(!releveFichier){releveNom.classList.add('masque');releveNom.innerHTML='';return;}
+  releveNom.classList.remove('masque');
+  releveNom.innerHTML=`<span>🏦</span><span>${T('releve_choisi')} ${esc(releveFichier.name)}</span><span class="x" title="✕">✕</span>`;
+  releveNom.querySelector('.x').onclick=()=>{releveFichier=null;releveInput.value='';rendreReleve();};
+}
 function rendreListe(){
   liste.innerHTML='';
   fichiers.forEach((f,i)=>{
@@ -700,16 +761,17 @@ function rendreListe(){
     li.querySelector('.x').onclick=()=>retirer(i);
     liste.appendChild(li);
   });
-  btn.disabled=fichiers.length===0;
+  btn.disabled=!fichiers.length&&!releveFichier;
 }
 
 btn.onclick=async()=>{
-  if(!fichiers.length)return;
+  if(!fichiers.length&&!releveFichier)return;
   btn.disabled=true;errBox.textContent='';res.classList.add('masque');
   etat.innerHTML='<span class="spin"></span> '+T('traitement');
   const fd=new FormData(); fichiers.forEach(f=>fd.append('fichiers',f,f.name));
   if(baseExcel)fd.append('base',baseExcel,baseExcel.name);
   if(planFichier)fd.append('plan',planFichier,planFichier.name);
+  if(releveFichier)fd.append('releve',releveFichier,releveFichier.name);
   fd.append('langue',LANG);
   if(document.getElementById('qboInput').checked)fd.append('qbo','1');
   try{
@@ -724,7 +786,7 @@ btn.onclick=async()=>{
 function fmt(x){return(x===null||x===undefined||x==='')?'':Number(x).toLocaleString(LANG==='fr'?'fr-CA':'en-CA',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function afficher(d){
   errBox.innerHTML=(d.erreurs&&d.erreurs.length)?d.erreurs.map(e=>`⚠ ${esc(e.fichier)} : ${esc(e.message)}`).join('<br>'):'';
-  if(!d.factures||!d.factures.length){res.classList.add('masque');if(d.erreurs&&d.erreurs.length){}else errBox.textContent=T('aucune');return;}
+  if(!d.download_id){res.classList.add('masque');if(d.erreurs&&d.erreurs.length){}else errBox.textContent=T('aucune');return;}
   let h=`<thead><tr><th>${T('th_f')}</th><th>${T('th_n')}</th><th>${T('th_d')}</th>
     <th>${T('th_ht')}</th><th>${T('th_tps')}</th><th>${T('th_tvq')}</th><th>${T('th_tx')}</th>
     <th>${T('th_ttc')}</th><th>${T('th_l')}</th><th>${T('th_cat')}</th></tr></thead><tbody>`;
@@ -737,12 +799,16 @@ function afficher(d){
         <td class="num">${fmt(f.tva)}</td><td class="num">${fmt(f.total_ttc)} ${esc(f.devise)}</td>
         <td class="num">${f.nb_lignes}</td><td>${esc(f.categorie)}</td></tr>`;
   });
-  tab.innerHTML=h+'</tbody>';
-  document.getElementById('titreRes').textContent=`${T('res')} — ${d.factures.length} ${T('pieces')}`;
-  document.getElementById('ajouteNote').textContent=d.ajoute?('↳ '+T('ajoute_note')):'';
+  tab.innerHTML=d.factures.length?h+'</tbody>':'';
+  document.getElementById('titreRes').textContent=d.factures.length
+    ? `${T('res')} — ${d.factures.length} ${T('pieces')}` : `${T('res')} — ${T('rap_titre')}`;
+  document.getElementById('ajouteNote').textContent=(d.ajoute&&d.factures.length)?('↳ '+T('ajoute_note')):'';
   const cumul=document.getElementById('cumul'), tot=d.totaux_fichier||[];
   cumul.innerHTML=tot.map(t=>`Σ ${T('cumul')} : <b>${fmt(t.total_ttc)} ${esc(t.devise)}</b> · ${T('dont_taxes')} ${fmt(t.taxes)} ${esc(t.devise)} · ${t.nb} ${T('nb_fact')}`).join('<br>');
-  cumul.classList.toggle('masque',!tot.length);
+  const rap=d.rapprochement;
+  if(rap) cumul.innerHTML+=(tot.length?'<br>':'')+`🏦 ${T('rap_titre')} : <b>${rap.rapprochees}</b> ${T('rap_ok')} · `
+    +`<b>${rap.sans_piece}</b> ${T('rap_sans')} (${fmt(rap.montant_sans_piece)}) · <b>${rap.absentes}</b> ${T('rap_abs')} — ${T('rap_voir')}`;
+  cumul.classList.toggle('masque',!tot.length&&!rap);
   const q=document.getElementById('telQbo');
   q.classList.toggle('masque',!d.qbo);
   if(d.download_id){tel.href='/telecharger/'+d.download_id;
