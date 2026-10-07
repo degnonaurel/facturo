@@ -22,9 +22,11 @@ pour être compatible avec les hébergeurs gratuits (Hugging Face, Render...).
 """
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -36,9 +38,72 @@ from starlette.concurrency import run_in_threadpool
 import facture_vers_excel as fve
 
 app = FastAPI(title="Facturo")
+_journal = logging.getLogger("facturo")
 
-_TELECHARGEMENTS: dict[str, str] = {}
+# jeton -> (chemin de l'Excel, heure de création). Les fichiers produits sont
+# effacés après DUREE_TELECHARGEMENT secondes : on ne garde pas les données.
+_TELECHARGEMENTS: dict[str, tuple[str, float]] = {}
 _DOSSIER = tempfile.mkdtemp(prefix="facturo_")
+DUREE_TELECHARGEMENT = int(os.getenv("FACTURO_DUREE_TELECHARGEMENT", "3600"))
+# Limites d'envoi (protègent la mémoire et le disque du serveur).
+TAILLE_MAX_FICHIER = int(os.getenv("FACTURO_TAILLE_MAX_MO", "15")) * 1024 * 1024
+MAX_FICHIERS_REQUETE = int(os.getenv("FACTURO_MAX_FICHIERS", "20"))
+
+_ENTETES_SECURITE = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; img-src 'self' data:; "
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+        "form-action 'self'"),
+}
+
+
+@app.middleware("http")
+async def _entetes_securite(request: Request, appel_suivant):
+    reponse = await appel_suivant(request)
+    for nom, valeur in _ENTETES_SECURITE.items():
+        reponse.headers.setdefault(nom, valeur)
+    return reponse
+
+
+def _purger_telechargements() -> None:
+    """Efface les fichiers produits plus vieux que DUREE_TELECHARGEMENT."""
+    limite = time.time() - DUREE_TELECHARGEMENT
+    for jeton, (chemin, cree) in list(_TELECHARGEMENTS.items()):
+        if cree < limite:
+            _TELECHARGEMENTS.pop(jeton, None)
+            for f in (chemin, chemin[:-5] + "_qbo.csv"):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+
+async def _lire_limite(up: UploadFile) -> Optional[bytes]:
+    """Contenu d'un fichier envoyé, ou None s'il dépasse TAILLE_MAX_FICHIER."""
+    contenu = await up.read(TAILLE_MAX_FICHIER + 1)
+    return None if len(contenu) > TAILLE_MAX_FICHIER else contenu
+
+
+_MESSAGES = {
+    "trop_gros": {"fr": "Fichier trop volumineux (max {mo} Mo)",
+                  "en": "File too large (max {mo} MB)"},
+    "service": {"fr": "Service de lecture momentanément indisponible, réessayez plus tard",
+                "en": "Reading service temporarily unavailable, please try again later"},
+    "illisible": {"fr": "Fichier illisible ou format non pris en charge",
+                  "en": "Unreadable file or unsupported format"},
+    "trop_de_fichiers": {"fr": "Trop de fichiers dans un même envoi (max {n})",
+                         "en": "Too many files in one upload (max {n})"},
+}
+
+
+def _message(cle: str, langue: str) -> str:
+    return _MESSAGES[cle][langue].format(mo=TAILLE_MAX_FICHIER // (1024 * 1024),
+                                         n=MAX_FICHIERS_REQUETE)
 
 
 def _pret() -> bool:
@@ -107,6 +172,10 @@ async def extraire(request: Request,
                    qbo: str = Form("")):
     langue = "en" if langue == "en" else "fr"
     veut_qbo = qbo in ("1", "true", "on")
+    _purger_telechargements()
+    if len(fichiers) > MAX_FICHIERS_REQUETE:
+        return JSONResponse({"erreurs": [{"fichier": "", "message":
+                             _message("trop_de_fichiers", langue)}]}, status_code=413)
     if not _reserver_quota(_visiteur(request), len(fichiers)):
         return JSONResponse({"quota_atteint": True}, status_code=429)
     factures, erreurs = [], []
@@ -114,21 +183,28 @@ async def extraire(request: Request,
         # Excel existant optionnel : les nouvelles lignes y seront ajoutées.
         base_path = None
         if base is not None and base.filename:
-            base_path = os.path.join(tmp, "base.xlsx")
-            with open(base_path, "wb") as f:
-                f.write(await base.read())
+            contenu = await _lire_limite(base)
+            if contenu is None:
+                erreurs.append({"fichier": base.filename,
+                                "message": _message("trop_gros", langue)})
+            else:
+                base_path = os.path.join(tmp, "base.xlsx")
+                with open(base_path, "wb") as f:
+                    f.write(contenu)
 
         # Plan comptable : fichier fourni > onglet du classeur de base > défaut.
         plan_comptable = []
         if plan is not None and plan.filename:
             ext = ".csv" if plan.filename.lower().endswith(".csv") else ".xlsx"
             plan_path = os.path.join(tmp, "plan" + ext)
-            with open(plan_path, "wb") as f:
-                f.write(await plan.read())
-            try:
-                plan_comptable = fve.lire_plan_comptable(plan_path)
-            except Exception:
-                pass
+            contenu = await _lire_limite(plan)
+            if contenu is not None:
+                with open(plan_path, "wb") as f:
+                    f.write(contenu)
+                try:
+                    plan_comptable = fve.lire_plan_comptable(plan_path)
+                except Exception:
+                    _journal.warning("Plan comptable illisible", exc_info=True)
             if not plan_comptable:
                 erreurs.append({"fichier": plan.filename, "message": (
                     "Chart of accounts unreadable, default plan used" if langue == "en"
@@ -140,22 +216,34 @@ async def extraire(request: Request,
                 pass
         plan_comptable = plan_comptable or fve.plan_par_defaut(langue)
 
-        chemins = []
+        chemins, recus = [], []
         for up in fichiers:
-            ext = os.path.splitext(up.filename or "")[1] or ".bin"
+            contenu = await _lire_limite(up)
+            if contenu is None:          # trop gros : signalé, le lot continue
+                erreurs.append({"fichier": up.filename,
+                                "message": _message("trop_gros", langue)})
+                continue
+            ext = os.path.splitext(up.filename or "")[1][:10] or ".bin"
             dest = os.path.join(tmp, f"{uuid.uuid4().hex}{ext}")
             with open(dest, "wb") as f:
-                f.write(await up.read())
+                f.write(contenu)
             chemins.append(dest)
+            recus.append(up)
 
         # Lecture en parallèle, hors de la boucle d'événements du serveur.
         resultats = await run_in_threadpool(
             fve.traiter_lot, chemins, paralleles=PARALLELES, plan=plan_comptable)
-        for up, res in zip(fichiers, resultats):
-            if isinstance(res, fve.ErreurLLM):
-                erreurs.append({"fichier": up.filename, "message": str(res)})
+        for up, res in zip(recus, resultats):
+            # Détail technique dans les journaux ; message générique à l'écran
+            # (ni nom du moteur, ni réponse brute de l'API).
+            if isinstance(res, fve.ErreurService):
+                _journal.error("Service de lecture : %s", res)
+                erreurs.append({"fichier": up.filename,
+                                "message": _message("service", langue)})
             elif isinstance(res, Exception):
-                erreurs.append({"fichier": up.filename, "message": f"Erreur : {res}"})
+                _journal.warning("Fichier illisible %s : %r", up.filename, res)
+                erreurs.append({"fichier": up.filename,
+                                "message": _message("illisible", langue)})
             else:
                 res.fichier = up.filename or res.fichier
                 factures.append(res)
@@ -170,14 +258,15 @@ async def extraire(request: Request,
         try:
             fve.construire_excel(factures, chemin, base_excel=base_path, langue=langue,
                                  plan=plan_comptable)
-        except Exception as e:
+        except Exception:
             # Excel de base illisible : on repart sur un fichier neuf.
+            _journal.warning("Excel de base illisible", exc_info=True)
             erreurs.append({"fichier": base.filename if base else "Excel existant",
-                            "message": (f"Existing Excel unreadable, new file created ({e})"
+                            "message": ("Existing Excel unreadable, new file created"
                                         if langue == "en" else
-                                        f"Excel existant illisible, nouveau fichier créé ({e})")})
+                                        "Excel existant illisible, nouveau fichier créé")})
             fve.construire_excel(factures, chemin, langue=langue, plan=plan_comptable)
-        _TELECHARGEMENTS[jeton] = chemin
+        _TELECHARGEMENTS[jeton] = (chemin, time.time())
         # CSV QuickBooks Online, en option et en plus de l'Excel (jamais à sa
         # place) : seulement les pièces de cet envoi, pour ne pas importer de
         # doublons quand on ajoute à un Excel existant.
@@ -187,8 +276,10 @@ async def extraire(request: Request,
                 fve.construire_csv_qbo(factures, chemin[:-5] + "_qbo.csv",
                                        plan=plan_comptable)
                 qbo_pret = True
-            except Exception as e:
-                erreurs.append({"fichier": "QuickBooks", "message": str(e)})
+            except Exception:
+                _journal.warning("Export QuickBooks impossible", exc_info=True)
+                erreurs.append({"fichier": "QuickBooks",
+                                "message": _message("illisible", langue)})
         try:
             totaux = fve.totaux_resume(chemin)
         except Exception:
@@ -209,7 +300,8 @@ async def extraire(request: Request,
 
 @app.get("/telecharger/{jeton}")
 def telecharger(jeton: str, format: str = "xlsx"):
-    chemin = _TELECHARGEMENTS.get(jeton)
+    _purger_telechargements()
+    chemin = _TELECHARGEMENTS.get(jeton, (None, 0))[0]
     if chemin and format == "qbo":
         chemin = chemin[:-5] + "_qbo.csv"
         if not os.path.isfile(chemin):
@@ -536,6 +628,8 @@ if(LANG!=='en') LANG='fr';
 let dernier = null;   // dernier résultat, pour re-rendre au changement de langue
 
 function T(k){return (I18N[LANG]&&I18N[LANG][k])||k;}
+// Tout texte venant d'un fichier (nom, contenu lu) est échappé avant affichage.
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function setLang(l){
   LANG=l; localStorage.setItem('facturo_lang',l);
   document.documentElement.lang=l;
@@ -585,7 +679,7 @@ function retirerBase(){baseExcel=null;baseInput.value='';rendreBase();}
 function rendreBase(){
   if(!baseExcel){baseNom.classList.add('masque');baseNom.innerHTML='';return;}
   baseNom.classList.remove('masque');
-  baseNom.innerHTML=`<span>📗</span><span>${T('base_choisi')} ${baseExcel.name}</span><span class="x" title="✕">✕</span>`;
+  baseNom.innerHTML=`<span>📗</span><span>${T('base_choisi')} ${esc(baseExcel.name)}</span><span class="x" title="✕">✕</span>`;
   baseNom.querySelector('.x').onclick=retirerBase;
 }
 let planFichier=null;
@@ -594,7 +688,7 @@ planInput.addEventListener('change',()=>{ if(planInput.files[0]){planFichier=pla
 function rendrePlan(){
   if(!planFichier){planNom.classList.add('masque');planNom.innerHTML='';return;}
   planNom.classList.remove('masque');
-  planNom.innerHTML=`<span>🗂️</span><span>${T('plan_choisi')} ${planFichier.name}</span><span class="x" title="✕">✕</span>`;
+  planNom.innerHTML=`<span>🗂️</span><span>${T('plan_choisi')} ${esc(planFichier.name)}</span><span class="x" title="✕">✕</span>`;
   planNom.querySelector('.x').onclick=()=>{planFichier=null;planInput.value='';rendrePlan();};
 }
 function rendreListe(){
@@ -602,7 +696,7 @@ function rendreListe(){
   fichiers.forEach((f,i)=>{
     const li=document.createElement('li');
     const ic=(f.name||'').toLowerCase().endsWith('.pdf')?'📄':'🖼️';
-    li.innerHTML=`<span class="ico">${ic}</span><span>${f.name}</span><span class="x" title="✕">✕</span>`;
+    li.innerHTML=`<span class="ico">${ic}</span><span>${esc(f.name)}</span><span class="x" title="✕">✕</span>`;
     li.querySelector('.x').onclick=()=>retirer(i);
     liste.appendChild(li);
   });
@@ -629,25 +723,25 @@ btn.onclick=async()=>{
 
 function fmt(x){return(x===null||x===undefined||x==='')?'':Number(x).toLocaleString(LANG==='fr'?'fr-CA':'en-CA',{minimumFractionDigits:2,maximumFractionDigits:2});}
 function afficher(d){
-  errBox.innerHTML=(d.erreurs&&d.erreurs.length)?d.erreurs.map(e=>`⚠ ${e.fichier} : ${e.message}`).join('<br>'):'';
+  errBox.innerHTML=(d.erreurs&&d.erreurs.length)?d.erreurs.map(e=>`⚠ ${esc(e.fichier)} : ${esc(e.message)}`).join('<br>'):'';
   if(!d.factures||!d.factures.length){res.classList.add('masque');if(d.erreurs&&d.erreurs.length){}else errBox.textContent=T('aucune');return;}
   let h=`<thead><tr><th>${T('th_f')}</th><th>${T('th_n')}</th><th>${T('th_d')}</th>
     <th>${T('th_ht')}</th><th>${T('th_tps')}</th><th>${T('th_tvq')}</th><th>${T('th_tx')}</th>
     <th>${T('th_ttc')}</th><th>${T('th_l')}</th><th>${T('th_cat')}</th></tr></thead><tbody>`;
   d.factures.forEach(f=>{
     let extra='';
-    if(f.pieces_liees&&f.pieces_liees.length)extra+=`<span class="lie">↻ ${T('regroupe')} ${f.pieces_liees.join(', ')}</span>`;
-    if(f.alertes&&f.alertes.length)extra+=`<span class="al">⚠ ${f.alertes.join(' | ')}</span>`;
-    h+=`<tr><td>${f.fournisseur||'—'}${extra}</td><td>${f.numero||''}</td><td>${f.date||''}</td>
+    if(f.pieces_liees&&f.pieces_liees.length)extra+=`<span class="lie">↻ ${T('regroupe')} ${esc(f.pieces_liees.join(', '))}</span>`;
+    if(f.alertes&&f.alertes.length)extra+=`<span class="al">⚠ ${esc(f.alertes.join(' | '))}</span>`;
+    h+=`<tr><td>${esc(f.fournisseur)||'—'}${extra}</td><td>${esc(f.numero)}</td><td>${esc(f.date)}</td>
         <td class="num">${fmt(f.total_ht)}</td><td class="num">${fmt(f.tps)}</td><td class="num">${fmt(f.tvq)}</td>
-        <td class="num">${fmt(f.tva)}</td><td class="num">${fmt(f.total_ttc)} ${f.devise||''}</td>
-        <td class="num">${f.nb_lignes}</td><td>${f.categorie||''}</td></tr>`;
+        <td class="num">${fmt(f.tva)}</td><td class="num">${fmt(f.total_ttc)} ${esc(f.devise)}</td>
+        <td class="num">${f.nb_lignes}</td><td>${esc(f.categorie)}</td></tr>`;
   });
   tab.innerHTML=h+'</tbody>';
   document.getElementById('titreRes').textContent=`${T('res')} — ${d.factures.length} ${T('pieces')}`;
   document.getElementById('ajouteNote').textContent=d.ajoute?('↳ '+T('ajoute_note')):'';
   const cumul=document.getElementById('cumul'), tot=d.totaux_fichier||[];
-  cumul.innerHTML=tot.map(t=>`Σ ${T('cumul')} : <b>${fmt(t.total_ttc)} ${t.devise}</b> · ${T('dont_taxes')} ${fmt(t.taxes)} ${t.devise} · ${t.nb} ${T('nb_fact')}`).join('<br>');
+  cumul.innerHTML=tot.map(t=>`Σ ${T('cumul')} : <b>${fmt(t.total_ttc)} ${esc(t.devise)}</b> · ${T('dont_taxes')} ${fmt(t.taxes)} ${esc(t.devise)} · ${t.nb} ${T('nb_fact')}`).join('<br>');
   cumul.classList.toggle('masque',!tot.length);
   const q=document.getElementById('telQbo');
   q.classList.toggle('masque',!d.qbo);

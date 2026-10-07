@@ -165,14 +165,14 @@ def preparer_image(chemin: str) -> tuple[str, str]:
             import pillow_heif
             pillow_heif.register_heif_opener()
         except ImportError as e:
-            raise ErreurLLM(
+            raise ErreurService(
                 "Photo HEIC détectée mais 'pillow-heif' n'est pas installé "
                 "-> pip install pillow-heif") from e
 
     try:
         from PIL import Image
     except ImportError as e:
-        raise ErreurLLM("Module 'pillow' manquant -> pip install pillow") from e
+        raise ErreurService("Module 'pillow' manquant -> pip install pillow") from e
 
     # Format déjà accepté par l'API et image raisonnable : envoi direct.
     if ext in _MEDIA_API:
@@ -196,7 +196,7 @@ def _rendre_pdf_en_images(chemin: str) -> list[tuple[str, str]]:
     try:
         import fitz  # PyMuPDF
     except ImportError as e:
-        raise ErreurLLM(
+        raise ErreurService(
             "PDF scanné (sans texte). Installez 'pymupdf' pour le traiter, "
             "ou envoyez-le en photo -> pip install pymupdf") from e
     from PIL import Image
@@ -275,6 +275,11 @@ class ErreurLLM(RuntimeError):
     pass
 
 
+class ErreurService(ErreurLLM):
+    """Panne du service de lecture (clé, API, module manquant) : le détail
+    est pour les journaux du serveur, pas pour l'utilisateur."""
+
+
 def extraire_avec_llm(
     texte: Optional[str] = None,
     images: Optional[list[tuple[str, str]]] = None,
@@ -307,7 +312,7 @@ def extraire_avec_llm(
         return _appeler_claude(texte, images, modele, timeout, schema, consigne)
     if fournisseur == "openai":
         return _appeler_openai(texte, images, modele, timeout, schema, consigne)
-    raise ErreurLLM(f"Fournisseur LLM inconnu : {fournisseur}")
+    raise ErreurService(f"Fournisseur LLM inconnu : {fournisseur}")
 
 
 def _resoudre_fournisseur(fournisseur: str) -> str:
@@ -318,7 +323,7 @@ def _resoudre_fournisseur(fournisseur: str) -> str:
         return "claude"
     if os.getenv("OPENAI_API_KEY"):
         return "openai"
-    raise ErreurLLM(
+    raise ErreurService(
         "Aucune clé API trouvée. Définissez ANTHROPIC_API_KEY ou OPENAI_API_KEY. "
         "(Le mode --moteur tables hors ligne ne fonctionne que sur les PDF texte.)")
 
@@ -327,7 +332,7 @@ def _appeler_claude(texte, images, modele, timeout, schema=_SCHEMA_FACTURE, cons
     import requests
     cle = os.getenv("ANTHROPIC_API_KEY")
     if not cle:
-        raise ErreurLLM("ANTHROPIC_API_KEY non définie.")
+        raise ErreurService("ANTHROPIC_API_KEY non définie.")
     base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
     modele = modele or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 
@@ -353,18 +358,18 @@ def _appeler_claude(texte, images, modele, timeout, schema=_SCHEMA_FACTURE, cons
                                  "content-type": "application/json"},
                         json=corps, timeout=timeout)
     if rep.status_code >= 400:
-        raise ErreurLLM(f"Erreur API Claude {rep.status_code} : {rep.text[:400]}")
+        raise ErreurService(f"Erreur API Claude {rep.status_code} : {rep.text[:400]}")
     for bloc in rep.json().get("content", []):
         if bloc.get("type") == "tool_use":
             return bloc["input"]
-    raise ErreurLLM("Réponse Claude sans appel d'outil exploitable.")
+    raise ErreurService("Réponse Claude sans appel d'outil exploitable.")
 
 
 def _appeler_openai(texte, images, modele, timeout, schema=_SCHEMA_FACTURE, consigne=""):
     import requests
     cle = os.getenv("OPENAI_API_KEY")
     if not cle:
-        raise ErreurLLM("OPENAI_API_KEY non définie.")
+        raise ErreurService("OPENAI_API_KEY non définie.")
     base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     modele = modele or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
@@ -389,7 +394,7 @@ def _appeler_openai(texte, images, modele, timeout, schema=_SCHEMA_FACTURE, cons
                                  "content-type": "application/json"},
                         json=corps, timeout=timeout)
     if rep.status_code >= 400:
-        raise ErreurLLM(f"Erreur API OpenAI {rep.status_code} : {rep.text[:400]}")
+        raise ErreurService(f"Erreur API OpenAI {rep.status_code} : {rep.text[:400]}")
     return json.loads(rep.json()["choices"][0]["message"]["content"])
 
 
@@ -960,7 +965,11 @@ def _ajouter_ligne(ws, positions: dict, valeurs: dict) -> int:
     """Écrit une ligne sous la dernière ligne remplie ; renvoie son numéro."""
     r = ws.max_row + 1
     for cle, v in valeurs.items():
-        ws.cell(row=r, column=positions[cle], value=v)
+        cell = ws.cell(row=r, column=positions[cle], value=v)
+        # Texte lu sur une pièce (donc non fiable) commençant par « = » :
+        # écrit comme texte, jamais comme formule exécutable.
+        if cell.data_type == "f":
+            cell.data_type = "s"
     return r
 
 
@@ -1321,13 +1330,28 @@ def lignes_qbo(f: Facture, plan: Optional[list[dict]] = None) -> list[dict]:
                             "Line Tax Amount": taxes})]
 
 
+_DEBUTS_FORMULE = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _texte_csv_sur(v: str) -> str:
+    """Neutralise un texte qu'un tableur prendrait pour une formule (injection
+    CSV) : apostrophe en tête, sauf pour un simple nombre comme « -12.50 »."""
+    if v.startswith(_DEBUTS_FORMULE) and not re.fullmatch(r"[-+]?\d+(\.\d+)?", v):
+        return "'" + v
+    return v
+
+
 def construire_csv_qbo(factures: list[Facture], chemin_sortie: str,
                        plan: Optional[list[dict]] = None) -> str:
     """Écrit le CSV d'import de factures fournisseurs de QuickBooks Online."""
     import csv
 
     def texte(v):
-        return "" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
+        if v is None:
+            return ""
+        if isinstance(v, float):
+            return f"{v:.2f}"
+        return _texte_csv_sur(str(v))
     with open(chemin_sortie, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=COLS_QBO)
         w.writeheader()

@@ -114,6 +114,18 @@ pytest -q
 The tests are self-contained (they generate their own inputs and mock the LLM):
 no network calls, no API key required.
 
+## Security
+
+- Text read from documents is treated as untrusted: it is escaped in the web page
+  and can never become a live formula in the Excel or QuickBooks files
+  (formula/CSV injection).
+- Upload limits (file size and count per request) and a daily demo quota.
+- Generated files are deleted after one hour; uploads are processed in
+  temporary folders and never kept.
+- Security headers (CSP, frame and MIME-sniffing protection); uploaded Excel
+  files are parsed with `defusedxml`.
+- Error messages stay generic; technical details go to the server logs only.
+
 ## Deployment
 
 The app is containerized (`Dockerfile`) and runs as-is on any Docker platform

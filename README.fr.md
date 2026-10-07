@@ -115,6 +115,20 @@ pytest -q
 Les tests sont autonomes (ils génèrent leurs propres entrées et simulent le
 LLM) : aucun appel réseau, aucune clé requise.
 
+## Sécurité
+
+- Le texte lu dans les pièces est traité comme non fiable : il est échappé dans
+  la page web et ne peut jamais devenir une formule active dans l'Excel ou le
+  fichier QuickBooks (injection de formules / CSV).
+- Limites d'envoi (taille et nombre de fichiers par requête) et quota de démo
+  quotidien.
+- Les fichiers produits sont effacés au bout d'une heure ; les envois sont
+  traités dans des dossiers temporaires et jamais conservés.
+- En-têtes de sécurité (CSP, protection contre l'intégration en cadre et le
+  « MIME sniffing ») ; les Excel envoyés sont lus avec `defusedxml`.
+- Messages d'erreur génériques ; les détails techniques restent dans les
+  journaux du serveur.
+
 ## Déploiement
 
 L'application est conteneurisée (`Dockerfile`) et se déploie telle quelle sur
