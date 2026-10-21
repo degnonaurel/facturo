@@ -48,9 +48,9 @@ pytest · Docker · déploiement continu sur Render.
 ### Pour les comptables
 
 Catégories et totaux sont toujours dans l'Excel, sur des onglets après le
-résumé : un usager courant peut les ignorer. L'import d'un plan comptable,
-l'ajout à un fichier existant, le relevé bancaire et l'export QuickBooks se
-trouvent dans l'onglet *Mode comptable* de l'app web, à un clic (lien direct :
+résumé : un usager courant peut les ignorer. Continuer un Excel Facturo existant fait partie de l'usage
+courant. L'import d'un plan comptable, le relevé bancaire et l'export
+QuickBooks se trouvent dans l'onglet *Mode comptable* de l'app web, à un clic (lien direct :
 `/#comptable`).
 
 - **Ajout à un Excel existant** — les nouvelles lignes s'ajoutent à la fin,

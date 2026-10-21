@@ -8,11 +8,12 @@ Facturo turns photos and PDFs of invoices and receipts into an accounting-ready
 Excel workbook, for bilingual (English/French) small businesses in Canada.
 Two levels of use, which must never get in each other's way:
 
-- **Everyday use** — drop files, download the Excel. Nothing else on screen.
+- **Everyday use** — drop files, download the Excel; optionally drop the
+  previous Facturo Excel to keep adding to it. Nothing else on screen.
 - **Accountants** (*Accountant mode* tab, one click away, link `/#comptable`)
   — chart of accounts with a preview of the accounts recognized, review of the
-  suggested account of each document before download, appending to an
-  existing workbook, bank statement reconciliation, QuickBooks Online export.
+  suggested account of each document before download, bank statement
+  reconciliation, QuickBooks Online export.
   In simple mode none of these options are sent, so they never change the
   Excel produced by the everyday flow.
 

@@ -46,8 +46,8 @@ continuous deployment on Render.
 ### For accountants
 
 Categories and totals are always in the Excel, on sheets after the summary, so
-everyday users can ignore them. Importing a chart of accounts, appending to an
-existing file, the bank statement and the QuickBooks export sit in the
+everyday users can ignore them. Continuing an existing Facturo Excel is part of everyday use. Importing a
+chart of accounts, the bank statement and the QuickBooks export sit in the
 *Accountant mode* tab of the web app, one click away (direct link: `/#comptable`).
 
 - **Append to an existing Excel file** — new rows are added at the end, nothing
