@@ -113,3 +113,63 @@ def test_dockerfile_copie_tous_les_modules():
     copie = " ".join(re.findall(r"^COPY (.+)$", (RACINE / "Dockerfile").read_text(), re.M))
     for module in RACINE.glob("*.py"):
         assert module.name in copie, f"{module.name} absent du Dockerfile"
+
+
+def _plan_csv() -> bytes:
+    return ("Code;Compte\n1000;Encaisse Desjardins\n5410;Repas et frais d'accueil\n"
+            "5420;Fournitures de culte\n").encode("utf-8")
+
+
+def test_mode_comptable_visible_et_plan_hors_panneau():
+    """Le plan comptable se dépose dans le mode comptable, visible d'un clic
+    (plus dans un panneau replié), et le mode a un lien direct #comptable."""
+    page = client.get("/").text
+    assert 'id="modeComptable"' in page and 'id="planZone"' in page
+    assert "<details" not in page
+    assert "#comptable" in page
+
+
+def test_apercu_du_plan_comptable():
+    r = client.post("/api/plan", files=[("plan", ("plan.csv", _plan_csv(), "text/csv"))])
+    comptes = r.json()["comptes"]
+    assert [c["id"] for c in comptes] == ["1000", "5410", "5420"]
+    assert comptes[1]["libelle"] == "5410 · Repas et frais d'accueil"
+    assert client.post("/api/plan", files=[("plan", ("x.csv", b"", "text/csv"))]).status_code == 400
+    std = client.get("/api/plan-standard?langue=en").json()["comptes"]
+    assert any(c["libelle"] == "5210 · Meals and entertainment" for c in std)
+
+
+def test_corriger_le_compte_met_a_jour_excel_et_quickbooks(tmp_path):
+    pdf = pdf_facture_demo(str(tmp_path / "f.pdf"))
+    with open(pdf, "rb") as fh:
+        files = [("fichiers", ("f.pdf", fh.read(), "application/pdf")),
+                 ("plan", ("plan.csv", _plan_csv(), "text/csv"))]
+    d = client.post("/api/extraire", files=files, data={"qbo": "1"}).json()
+    assert [c["id"] for c in d["plan"]] == ["1000", "5410", "5420"]
+    jeton = d["download_id"]
+
+    r = client.post("/api/comptes", json={"jeton": jeton, "comptes": {"0": "5420"}})
+    assert r.status_code == 200
+    assert r.json()["factures"][0]["compte"] == "5420"
+    wb = load_workbook(io.BytesIO(client.get("/telecharger/" + jeton).content))
+    titres = [c.value for c in wb["Resume"][1]]
+    col = titres.index("Catégorie")
+    assert wb["Resume"].cell(2, col + 1).value == "5420 · Fournitures de culte"
+    csv = client.get(f"/telecharger/{jeton}?format=qbo").text
+    assert "Fournitures de culte" in csv
+
+    # Un compte hors du plan est ignoré ; un jeton inconnu est refusé.
+    client.post("/api/comptes", json={"jeton": jeton, "comptes": {"0": "9999"}})
+    assert client.post("/api/comptes", json={"jeton": jeton}).json()["factures"][0]["compte"] == "5420"
+    assert client.post("/api/comptes", json={"jeton": "inconnu", "comptes": {}}).status_code == 404
+
+
+def test_session_effacee_avec_le_fichier(tmp_path, monkeypatch):
+    pdf = pdf_facture_demo(str(tmp_path / "f.pdf"))
+    with open(pdf, "rb") as fh:
+        d = client.post("/api/extraire",
+                        files=[("fichiers", ("f.pdf", fh.read(), "application/pdf"))]).json()
+    assert d["download_id"] in interface_web._SESSIONS
+    monkeypatch.setattr(interface_web, "DUREE_TELECHARGEMENT", -1)
+    interface_web._purger_telechargements()
+    assert d["download_id"] not in interface_web._SESSIONS

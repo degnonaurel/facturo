@@ -31,7 +31,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi import FastAPI, UploadFile, File, Form, Request, Body
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -44,6 +44,9 @@ _journal = logging.getLogger("facturo")
 # jeton -> (chemin de l'Excel, heure de création). Les fichiers produits sont
 # effacés après DUREE_TELECHARGEMENT secondes : on ne garde pas les données.
 _TELECHARGEMENTS: dict[str, tuple[str, float]] = {}
+# jeton -> pièces lues et options de l'envoi, pour reconstruire l'Excel quand
+# le comptable corrige un compte (même durée de vie que le fichier produit).
+_SESSIONS: dict[str, dict] = {}
 _DOSSIER = tempfile.mkdtemp(prefix="facturo_")
 DUREE_TELECHARGEMENT = int(os.getenv("FACTURO_DUREE_TELECHARGEMENT", "3600"))
 # Limites d'envoi (protègent la mémoire et le disque du serveur).
@@ -77,7 +80,8 @@ def _purger_telechargements() -> None:
     for jeton, (chemin, cree) in list(_TELECHARGEMENTS.items()):
         if cree < limite:
             _TELECHARGEMENTS.pop(jeton, None)
-            for f in (chemin, chemin[:-5] + "_qbo.csv"):
+            _SESSIONS.pop(jeton, None)
+            for f in (chemin, chemin[:-5] + "_qbo.csv", chemin[:-5] + "_base.xlsx"):
                 try:
                     os.remove(f)
                 except OSError:
@@ -175,6 +179,57 @@ def statut(request: Request):
             "restant": _restant(_visiteur(request)), "contact": CONTACT}
 
 
+def _plan_affiche(plan: list[dict]) -> list[dict]:
+    """Comptes proposés dans les listes déroulantes : identifiant + libellé."""
+    return [{"id": fve._id_compte(c), "libelle": fve.libelle_compte(plan, fve._id_compte(c)),
+             "type": c.get("type", "")} for c in plan]
+
+
+def _id_de_libelle(plan: list[dict], libelle: str) -> str:
+    for c in plan:
+        if libelle and fve.libelle_compte(plan, fve._id_compte(c)) == libelle:
+            return fve._id_compte(c)
+    return ""
+
+
+async def _lire_plan(plan: Optional[UploadFile], tmp: str) -> list[dict]:
+    """Plan comptable d'un fichier envoyé (Excel ou CSV) ; [] s'il est illisible."""
+    ext = ".csv" if plan.filename.lower().endswith(".csv") else ".xlsx"
+    plan_path = os.path.join(tmp, "plan" + ext)
+    contenu = await _lire_limite(plan)
+    if contenu is None:
+        return []
+    with open(plan_path, "wb") as f:
+        f.write(contenu)
+    try:
+        return fve.lire_plan_comptable(plan_path)
+    except Exception:
+        _journal.warning("Plan comptable illisible", exc_info=True)
+        return []
+
+
+@app.post("/api/plan")
+async def apercu_plan(plan: UploadFile = File(...), langue: str = Form("fr")):
+    """Aperçu d'un plan comptable, avant tout envoi de pièces (sans lecture IA,
+    donc hors quota) : le comptable voit tout de suite les comptes reconnus."""
+    langue = "en" if langue == "en" else "fr"
+    with tempfile.TemporaryDirectory() as tmp:
+        comptes = await _lire_plan(plan, tmp) if plan.filename else []
+    if not comptes:
+        return JSONResponse({"comptes": [], "erreur": (
+            "Chart of accounts unreadable (Excel or CSV with a code and a name column)"
+            if langue == "en" else
+            "Plan comptable illisible (Excel ou CSV avec une colonne code et une colonne nom)")},
+            status_code=400)
+    return {"comptes": _plan_affiche(comptes)}
+
+
+@app.get("/api/plan-standard")
+def plan_standard(langue: str = "fr"):
+    langue = "en" if langue == "en" else "fr"
+    return {"comptes": _plan_affiche(fve.plan_par_defaut(langue))}
+
+
 @app.post("/api/extraire")
 async def extraire(request: Request,
                    fichiers: Optional[list[UploadFile]] = File(None),
@@ -214,16 +269,7 @@ async def extraire(request: Request,
         # Plan comptable : fichier fourni > onglet du classeur de base > défaut.
         plan_comptable = []
         if plan is not None and plan.filename:
-            ext = ".csv" if plan.filename.lower().endswith(".csv") else ".xlsx"
-            plan_path = os.path.join(tmp, "plan" + ext)
-            contenu = await _lire_limite(plan)
-            if contenu is not None:
-                with open(plan_path, "wb") as f:
-                    f.write(contenu)
-                try:
-                    plan_comptable = fve.lire_plan_comptable(plan_path)
-                except Exception:
-                    _journal.warning("Plan comptable illisible", exc_info=True)
+            plan_comptable = await _lire_plan(plan, tmp)
             if not plan_comptable:
                 erreurs.append({"fichier": plan.filename, "message": (
                     "Chart of accounts unreadable, default plan used" if langue == "en"
@@ -308,6 +354,14 @@ async def extraire(request: Request,
             fve.construire_excel(factures, chemin, langue=langue, plan=plan_comptable,
                                  releve=transactions, bilan=bilan)
         _TELECHARGEMENTS[jeton] = (chemin, time.time())
+        # Copie de l'Excel de base : il resservira si un compte est corrigé.
+        base_copie = None
+        if base_path:
+            base_copie = chemin[:-5] + "_base.xlsx"
+            with open(base_path, "rb") as src, open(base_copie, "wb") as dst:
+                dst.write(src.read())
+        _SESSIONS[jeton] = {"factures": factures, "plan": plan_comptable, "langue": langue,
+                            "base": base_copie, "releve": transactions, "qbo": veut_qbo}
         # CSV QuickBooks Online, en option et en plus de l'Excel (jamais à sa
         # place) : seulement les pièces de cet envoi, pour ne pas importer de
         # doublons quand on ajoute à un Excel existant.
@@ -326,18 +380,68 @@ async def extraire(request: Request,
         except Exception:
             totaux = []
 
-    resume = [{
+    return {"factures": _resume(factures, plan_comptable, langue), "erreurs": erreurs,
+            "download_id": jeton, "ajoute": bool(base_path), "totaux_fichier": totaux,
+            "qbo": qbo_pret, "rapprochement": bilan or None,
+            "plan": _plan_affiche(plan_comptable), "plan_fourni": bool(plan is not None
+                                                                     and plan.filename),
+            "restant": _restant(_visiteur(request))}
+
+
+def _resume(factures: list, plan: list[dict], langue: str) -> list[dict]:
+    return [{
         "fichier": f.fichier, "fournisseur": f.fournisseur, "numero": f.numero,
         "date": f.date, "devise": f.devise, "total_ht": f.total_ht,
         "tps": f.tps, "tvq": f.tvq, "tva": f.tva, "total_ttc": f.total_ttc,
         "nb_lignes": len(f.lignes), "pieces_liees": f.pieces_liees,
-        "categorie": f.categorie,
+        "categorie": f.categorie, "compte": _id_de_libelle(plan, f.categorie),
         "alertes": [fve.traduire_alerte(a, langue) for a in f.alertes],
     } for f in factures]
-    return {"factures": resume, "erreurs": erreurs, "download_id": jeton,
-            "ajoute": bool(base_path), "totaux_fichier": totaux, "qbo": qbo_pret,
-            "rapprochement": bilan or None,
-            "restant": _restant(_visiteur(request))}
+
+
+@app.post("/api/comptes")
+def corriger_comptes(donnees: dict = Body(...)):
+    """Le comptable choisit le compte de chaque pièce dans SON plan : on
+    reconstruit l'Excel (et le CSV QuickBooks) avec ses choix, au même lien."""
+    _purger_telechargements()
+    jeton = str(donnees.get("jeton", ""))
+    session = _SESSIONS.get(jeton)
+    chemin = _TELECHARGEMENTS.get(jeton, (None, 0))[0]
+    if not session or not chemin:
+        return JSONResponse({"erreur": "Fichier introuvable ou expiré."}, status_code=404)
+    plan, factures = session["plan"], session["factures"]
+    ids = {fve._id_compte(c) for c in plan}
+    choix = donnees.get("comptes") or {}
+    if not isinstance(choix, dict):
+        return JSONResponse({"erreur": "Format invalide."}, status_code=400)
+    for cle, ident in choix.items():
+        try:
+            i = int(cle)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= i < len(factures) and str(ident) in ids:
+            libelle = fve.libelle_compte(plan, str(ident))
+            # Toute la pièce va dans le compte choisi, articles compris.
+            factures[i].categorie = libelle
+            for ligne in factures[i].lignes:
+                ligne.categorie = libelle
+    bilan: dict = {}
+    options = {"langue": session["langue"], "plan": plan, "releve": session["releve"]}
+    try:
+        fve.construire_excel(factures, chemin, base_excel=session["base"], bilan=bilan,
+                             **options)
+    except Exception:
+        # Excel de base illisible (déjà signalé au premier envoi) : fichier neuf.
+        _journal.warning("Excel de base illisible", exc_info=True)
+        fve.construire_excel(factures, chemin, bilan=bilan, **options)
+    if session["qbo"] and factures:
+        fve.construire_csv_qbo(factures, chemin[:-5] + "_qbo.csv", plan=plan)
+    try:
+        totaux = fve.totaux_resume(chemin)
+    except Exception:
+        totaux = []
+    return {"factures": _resume(factures, plan, session["langue"]),
+            "totaux_fichier": totaux, "rapprochement": bilan or None}
 
 
 @app.get("/telecharger/{jeton}")
@@ -371,463 +475,638 @@ _PAGE = r"""<!DOCTYPE html>
 <title>Facturo — de la photo au tableur</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans:wght@400;500;600&family=Schibsted+Grotesk:wght@600;700&display=swap" rel="stylesheet">
 <style>
+  /* Mise en page : une seule « table de travail » centrale. Deux modes visibles
+     en haut (simple / comptable) ; en mode comptable, trois étapes côte à côte
+     (plan, pièces, options), puis la vérification des comptes pièce par pièce. */
   :root{
-    --paper:#F4F1EA; --card:#FFFFFF; --ink:#1B2024; --muted:#6C7176;
-    --bord:#E7E1D5; --pri:#0E6E5E; --pri-fort:#0A5849; --acc:#EE6B3F;
-    --acc-doux:#FCE9DF; --ok:#0E6E5E; --alerte:#B25B1E; --ombre:0 10px 30px rgba(20,30,28,.08);
-    --r:16px;
+    --bg:#F3F6F5; --surface:#FFFFFF; --surface2:#F8FAF9; --ink:#14201C; --muted:#5D6A65;
+    --line:#DCE4E1; --pri:#0E6E5E; --pri-fort:#0A5849; --pri-doux:#E2F1EC;
+    --acc:#E8673A; --acc-doux:#FCEBE3; --warn:#A3560F; --warn-doux:#FBEEDD;
+    --ombre:0 1px 2px rgba(16,32,28,.05),0 12px 32px rgba(16,32,28,.07);
+    --f-titre:"Schibsted Grotesk","Segoe UI",system-ui,sans-serif;
+    --f-texte:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+    --f-chiffre:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+    --r:14px;
   }
-  :root[data-theme="dark"], html[data-auto-dark]{}
-  @media (prefers-color-scheme: dark){
-    :root:not([data-theme="light"]){
-      --paper:#121618; --card:#1A2023; --ink:#ECE9E1; --muted:#98A0A2;
-      --bord:#2A3236; --pri:#2FBBA0; --pri-fort:#26A38B; --acc:#FF7E56;
-      --acc-doux:#33241d; --bord2:#2A3236; --ombre:0 10px 30px rgba(0,0,0,.35);
-    }
-  }
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+    --bg:#0E1412; --surface:#151D1A; --surface2:#19221F; --ink:#E5ECE9; --muted:#93A29C;
+    --line:#26322E; --pri:#3BC1A4; --pri-fort:#5BD3B8; --pri-doux:#15302A;
+    --acc:#FF8A5E; --acc-doux:#3A2219; --warn:#F0AE5E; --warn-doux:#35260F;
+    --ombre:0 1px 2px rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.35); color-scheme:dark }}
+  :root[data-theme="dark"]{
+    --bg:#0E1412; --surface:#151D1A; --surface2:#19221F; --ink:#E5ECE9; --muted:#93A29C;
+    --line:#26322E; --pri:#3BC1A4; --pri-fort:#5BD3B8; --pri-doux:#15302A;
+    --acc:#FF8A5E; --acc-doux:#3A2219; --warn:#F0AE5E; --warn-doux:#35260F;
+    --ombre:0 1px 2px rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.35); color-scheme:dark }
   *{box-sizing:border-box}
   html,body{margin:0}
-  body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-       background:
-         radial-gradient(1100px 500px at 88% -8%, color-mix(in srgb, var(--pri) 12%, transparent), transparent 60%),
-         radial-gradient(900px 500px at 5% 8%, color-mix(in srgb, var(--acc) 10%, transparent), transparent 55%),
-         var(--paper);
-       color:var(--ink);line-height:1.55;min-height:100vh}
-  a{color:inherit}
-  .barre{max-width:960px;margin:0 auto;padding:20px 18px;display:flex;align-items:center;gap:12px}
-  .logo{display:flex;align-items:center;gap:11px;font-family:"Space Grotesk",sans-serif}
-  .logo .nom{font-weight:700;font-size:1.28rem;letter-spacing:-.02em}
-  .logo .nom b{color:var(--pri)}
+  body{font:15px/1.55 var(--f-texte);background:var(--bg);color:var(--ink);min-height:100vh}
+  a{color:var(--pri)}
+  button{font:inherit}
+  :focus-visible{outline:2px solid var(--pri);outline-offset:2px}
+  .masque{display:none!important}
+  .conteneur{max-width:1080px;margin:0 auto;padding-left:max(18px,env(safe-area-inset-left,0px));
+    padding-right:max(18px,env(safe-area-inset-right,0px))}
+
+  /* En-tête */
+  .barre{display:flex;align-items:center;gap:14px;padding-block:18px}
+  .logo{display:flex;align-items:center;gap:10px;font-family:var(--f-titre);font-weight:700;
+    font-size:1.25rem;letter-spacing:-.02em;text-decoration:none;color:var(--ink)}
+  .logo b{color:var(--pri)}
   .droite{margin-left:auto;display:flex;align-items:center;gap:14px}
   .statut{display:inline-flex;align-items:center;gap:7px;font-size:.82rem;color:var(--muted)}
-  .pastille{width:9px;height:9px;border-radius:50%;background:#c9ccce}
-  .pastille.on{background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 20%,transparent)}
-  .pastille.off{background:var(--alerte);box-shadow:0 0 0 4px color-mix(in srgb,var(--alerte) 20%,transparent)}
-  .lang{display:flex;border:1px solid var(--bord);border-radius:999px;overflow:hidden;font-size:.8rem;font-weight:600}
-  .lang button{border:none;background:transparent;color:var(--muted);padding:6px 12px;cursor:pointer;font:inherit}
-  .lang button.actif{background:var(--pri);color:#fff}
-  .wrap{max-width:960px;margin:0 auto;padding:10px 18px 70px}
-  .hero{padding:20px 4px 26px}
-  .hero h1{font-family:"Space Grotesk",sans-serif;font-weight:700;font-size:2.35rem;line-height:1.08;
-           letter-spacing:-.03em;margin:.2em 0 .35em}
-  .hero h1 .surligne{background:linear-gradient(transparent 62%, color-mix(in srgb,var(--acc) 45%,transparent) 0);padding:0 .06em}
-  .hero p{font-size:1.08rem;color:var(--muted);max-width:640px;margin:0}
-  .carte{background:var(--card);border:1px solid var(--bord);border-radius:var(--r);box-shadow:var(--ombre)}
-  .p24{padding:24px}
-  #zone{border:2px dashed color-mix(in srgb,var(--pri) 35%,var(--bord));border-radius:14px;padding:40px 20px;
-        text-align:center;cursor:pointer;transition:.15s;background:color-mix(in srgb,var(--pri) 4%,transparent)}
-  #zone:hover,#zone.survol{border-color:var(--acc);background:var(--acc-doux)}
-  #zone .cercle{width:60px;height:60px;border-radius:50%;background:var(--card);border:1px solid var(--bord);
-                display:flex;align-items:center;justify-content:center;margin:0 auto 12px;box-shadow:var(--ombre)}
-  #zone .cercle svg{width:28px;height:28px}
-  #zone .gros{font-weight:600;font-size:1.05rem}
-  #zone .petit{color:var(--muted);font-size:.86rem;margin-top:4px}
-  ul.fichiers{list-style:none;padding:0;margin:16px 0 0;display:grid;gap:8px}
-  ul.fichiers li{display:flex;align-items:center;gap:11px;padding:10px 13px;border:1px solid var(--bord);
-                 border-radius:11px;font-size:.92rem;background:var(--card)}
-  ul.fichiers .ico{width:22px;text-align:center}
-  ul.fichiers .x{margin-left:auto;color:var(--muted);cursor:pointer;font-weight:700;padding:2px 6px;border-radius:6px}
-  ul.fichiers .x:hover{background:var(--acc-doux);color:var(--acc)}
-  .avance{margin-top:16px;border-top:1px solid var(--bord);padding-top:12px}
-  .avance summary{cursor:pointer;font-weight:600;font-size:.92rem;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
-  .avance summary .base-hint{font-weight:400}
-  .avance summary::before{content:"▸";color:var(--pri)}
-  .avance[open] summary::before{content:"▾"}
-  .avance summary::-webkit-details-marker{display:none}
-  .avance summary{list-style:none}
-  .coche{margin-top:14px;display:flex;gap:10px;align-items:flex-start;font-size:.9rem;cursor:pointer}
-  .coche input{margin-top:4px;accent-color:var(--pri)}
-  .base-zone{margin-top:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-  .base-btn{display:inline-flex;align-items:center;gap:6px;border:1px dashed var(--bord);border-radius:10px;
-            padding:9px 14px;cursor:pointer;font-size:.88rem;font-weight:600;color:var(--pri);background:transparent}
-  .base-btn:hover{border-color:var(--pri);background:color-mix(in srgb,var(--pri) 5%,transparent)}
-  .base-hint{color:var(--muted);font-size:.8rem}
-  .base-nom{width:100%;display:flex;align-items:center;gap:9px;font-size:.88rem;padding:9px 13px;
-            border:1px solid var(--bord);border-radius:10px;background:var(--acc-doux)}
-  .base-nom .x{margin-left:auto;cursor:pointer;font-weight:700;color:var(--muted);padding:2px 6px;border-radius:6px}
-  .base-nom .x:hover{color:var(--acc)}
-  .actions{margin-top:18px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
-  .btn{font:inherit;font-weight:600;border:none;border-radius:12px;padding:13px 24px;cursor:pointer;
-       font-family:"Space Grotesk",sans-serif}
-  .btn.pri{background:var(--pri);color:#fff;box-shadow:0 6px 16px color-mix(in srgb,var(--pri) 35%,transparent)}
-  .btn.pri:hover{background:var(--pri-fort)}
-  .btn.pri:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
-  .tel{background:var(--acc);color:#fff;text-decoration:none;border-radius:12px;padding:13px 22px;font-weight:600;
-       font-family:"Space Grotesk",sans-serif;display:inline-flex;gap:8px;align-items:center;
-       box-shadow:0 6px 16px color-mix(in srgb,var(--acc) 38%,transparent)}
-  .tel:hover{filter:brightness(.96)}
-  .tels{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-  .tel2{color:var(--pri);text-decoration:none;border:1px solid var(--bord);border-radius:12px;padding:12px 18px;
-        font-weight:600;font-family:"Space Grotesk",sans-serif;display:inline-flex;gap:8px;align-items:center}
-  .tel2:hover{border-color:var(--pri)}
-  .spin{width:17px;height:17px;border:3px solid var(--bord);border-top-color:var(--pri);border-radius:50%;
-        animation:t .8s linear infinite;display:inline-block;vertical-align:middle}
+  .pastille{width:8px;height:8px;border-radius:50%;background:var(--line)}
+  .pastille.on{background:var(--pri)} .pastille.off{background:var(--warn)}
+  .lang{display:flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;font-size:.8rem;font-weight:600}
+  .lang button{border:0;background:transparent;color:var(--muted);padding:6px 12px;cursor:pointer}
+  .lang button.actif{background:var(--ink);color:var(--surface)}
+
+  /* Accroche */
+  .hero{padding-block:22px 26px;display:grid;gap:12px}
+  .surtitre{font-size:.76rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--pri)}
+  .hero h1{font-family:var(--f-titre);font-weight:700;font-size:clamp(1.9rem,4.2vw,2.8rem);line-height:1.06;
+    letter-spacing:-.03em;margin:0;text-wrap:balance;max-width:20ch}
+  .hero p{margin:0;color:var(--muted);font-size:1.06rem;max-width:60ch}
+
+  /* Carte de travail */
+  .atelier{background:var(--surface);border:1px solid var(--line);border-radius:20px;box-shadow:var(--ombre);overflow:hidden}
+  .modes{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--line);background:var(--surface2)}
+  .mode{display:flex;gap:12px;align-items:flex-start;text-align:left;border:0;background:transparent;cursor:pointer;
+    padding:16px 20px;color:var(--muted);border-bottom:3px solid transparent;margin-bottom:-1px}
+  .mode+.mode{border-left:1px solid var(--line)}
+  .mode svg{flex:0 0 22px;width:22px;height:22px;margin-top:2px}
+  .mode b{display:block;font-family:var(--f-titre);font-size:1.02rem;color:var(--ink)}
+  .mode span{font-size:.84rem;line-height:1.4}
+  .mode[aria-selected="true"]{background:var(--surface);border-bottom-color:var(--pri);color:var(--muted)}
+  .mode[aria-selected="true"] svg{color:var(--pri)}
+  .mode:not([aria-selected="true"]):hover{background:var(--surface)}
+  .corps{padding:22px}
+  .etapes{display:grid;gap:18px}
+  body.comptable .etapes{grid-template-columns:minmax(0,1fr) minmax(0,1.25fr) minmax(0,1fr)}
+  .etape{display:grid;gap:12px;align-content:start;min-width:0}
+  .etape-tete{display:flex;align-items:baseline;gap:10px}
+  .etape-tete .n{font-family:var(--f-chiffre);font-size:.78rem;color:var(--pri);background:var(--pri-doux);
+    border-radius:6px;padding:1px 7px}
+  .etape-tete h2{font-family:var(--f-titre);font-size:1.02rem;margin:0}
+  body:not(.comptable) .etape-tete, body:not(.comptable) .seul-comptable{display:none!important}
+  .aide{color:var(--muted);font-size:.84rem;margin:0}
+
+  /* Zones de dépôt */
+  .zone{border:1.5px dashed color-mix(in srgb,var(--pri) 45%,var(--line));border-radius:var(--r);
+    padding:34px 18px;text-align:center;cursor:pointer;background:color-mix(in srgb,var(--pri) 3%,var(--surface));
+    transition:background .15s,border-color .15s}
+  .zone:hover,.zone.survol{border-color:var(--pri);background:var(--pri-doux)}
+  .zone.petite{padding:18px 14px}
+  .zone .ico{width:44px;height:44px;margin:0 auto 10px;border-radius:12px;display:grid;place-items:center;
+    background:var(--surface);border:1px solid var(--line);color:var(--pri)}
+  .zone .gros{font-weight:600}
+  .zone .petit{color:var(--muted);font-size:.84rem;margin-top:3px}
+  ul.fichiers{list-style:none;padding:0;margin:0;display:grid;gap:6px}
+  ul.fichiers li,.puce{display:flex;align-items:center;gap:10px;padding:8px 11px;border:1px solid var(--line);
+    border-radius:10px;font-size:.88rem;background:var(--surface);min-width:0}
+  ul.fichiers li span.nom,.puce span.nom{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  .x{margin-left:auto;border:0;background:transparent;color:var(--muted);cursor:pointer;font-weight:700;
+    padding:2px 7px;border-radius:6px;flex:0 0 auto}
+  .x:hover{background:var(--acc-doux);color:var(--acc)}
+  .ext{font-family:var(--f-chiffre);font-size:.7rem;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:0 5px}
+
+  /* Plan comptable */
+  .plan-etat{border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;display:grid;gap:8px;background:var(--surface2)}
+  .plan-etat.fourni{border-color:color-mix(in srgb,var(--pri) 45%,var(--line));background:var(--pri-doux)}
+  .plan-etat .ligne{display:flex;align-items:center;gap:8px;font-size:.9rem;flex-wrap:wrap}
+  .plan-etat b{font-weight:600}
+  .comptes{display:flex;flex-wrap:wrap;gap:5px}
+  .compte{font-size:.76rem;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:2px 8px;
+    max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .compte code{font-family:var(--f-chiffre);color:var(--pri)}
+  .lien{border:0;background:none;color:var(--pri);font-weight:600;cursor:pointer;padding:0;font-size:.84rem;text-decoration:underline;text-underline-offset:2px}
+  .tous{max-height:180px;overflow:auto;border-top:1px solid var(--line);padding-top:8px;font-size:.82rem;display:grid;gap:3px}
+  .tous div{display:flex;gap:8px} .tous code{font-family:var(--f-chiffre);color:var(--pri);min-width:3.5em}
+
+  /* Options */
+  .option{display:flex;gap:12px;align-items:flex-start;border:1px solid var(--line);border-radius:12px;padding:11px 13px;
+    cursor:pointer;background:var(--surface)}
+  .option:hover{border-color:color-mix(in srgb,var(--pri) 50%,var(--line))}
+  .option b{display:block;font-size:.9rem}
+  .option .aide{font-size:.8rem}
+  .option svg{flex:0 0 20px;width:20px;height:20px;color:var(--pri);margin-top:1px}
+  .option.choisi{border-color:var(--pri);background:var(--pri-doux)}
+  .option .nomfic{font-size:.8rem;color:var(--pri-fort);font-weight:600;word-break:break-all}
+  .interrupteur{appearance:none;flex:0 0 36px;width:36px;height:20px;border-radius:999px;background:var(--line);position:relative;
+    cursor:pointer;margin:1px 0 0;transition:background .15s}
+  .interrupteur::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;
+    transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+  .interrupteur:checked{background:var(--pri)} .interrupteur:checked::after{transform:translateX(16px)}
+
+  /* Action */
+  .actions{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:20px;padding-top:18px;border-top:1px solid var(--line)}
+  .btn{font-family:var(--f-titre);font-weight:600;border:0;border-radius:12px;padding:13px 22px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:8px;text-decoration:none;font-size:.98rem}
+  .btn.pri{background:var(--pri);color:#fff} .btn.pri:hover{background:var(--pri-fort)}
+  :root[data-theme="dark"] .btn.pri{color:#06201A}
+  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .btn.pri{color:#06201A} }
+  .btn.pri:disabled{opacity:.45;cursor:not-allowed}
+  .btn.sec{background:var(--surface);color:var(--pri);border:1px solid var(--line)} .btn.sec:hover{border-color:var(--pri)}
+  .etat{color:var(--muted);font-size:.9rem}
+  .spin{width:16px;height:16px;border:3px solid var(--line);border-top-color:var(--pri);border-radius:50%;
+    animation:t .8s linear infinite;display:inline-block;vertical-align:-3px}
   @keyframes t{to{transform:rotate(360deg)}}
-  .etat{color:var(--muted);font-size:.92rem}
-  .quota-note{margin-top:10px;color:var(--muted);font-size:.84rem}
+  @media (prefers-reduced-motion:reduce){.spin{animation:none}*{transition:none!important}}
+  .quota-note{color:var(--muted);font-size:.84rem;margin-left:auto}
   .quota-note b{color:var(--ink)}
-  .quota-note a,.err a{color:var(--pri);font-weight:600}
-  .offre{margin-top:22px;padding:22px 24px;display:flex;gap:20px;align-items:center;flex-wrap:wrap;
-    justify-content:space-between;border-left:4px solid var(--acc)}
-  .offre>div{flex:1 1 260px;min-width:0}
-  .offre h3{margin:4px 0 6px;font-family:'Space Grotesk',sans-serif;font-size:1.15rem}
-  .offre p{margin:0;color:var(--muted);font-size:.92rem;line-height:1.55}
-  .offre-tag{display:inline-block;font-size:.72rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
-    color:var(--acc);background:var(--acc-doux);padding:3px 9px;border-radius:999px}
-  .offre-btn{text-decoration:none;white-space:nowrap}
-  .etapes{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:22px 0 0}
-  .etape{display:flex;gap:11px;align-items:flex-start;font-size:.9rem}
-  .etape .n{flex:0 0 26px;height:26px;border-radius:8px;background:var(--acc-doux);color:var(--acc);
-            font-weight:700;display:flex;align-items:center;justify-content:center;font-family:"Space Grotesk",sans-serif}
-  .etape b{display:block}
-  .etape span{color:var(--muted)}
-  .resultats{margin-top:26px}
-  .res-tete{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:14px}
-  .res-tete h2{font-family:"Space Grotesk",sans-serif;font-size:1.2rem;margin:0}
-  table{width:100%;border-collapse:collapse;font-size:.88rem;overflow:hidden;border-radius:12px;border:1px solid var(--bord)}
-  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--bord)}
-  thead th{background:color-mix(in srgb,var(--pri) 10%,var(--card));color:var(--pri-fort);font-weight:600;
-           font-family:"Space Grotesk",sans-serif;letter-spacing:.01em}
-  td.num{text-align:right;font-variant-numeric:tabular-nums}
-  tbody tr:last-child td{border-bottom:none}
-  tbody tr:hover{background:color-mix(in srgb,var(--pri) 4%,transparent)}
-  .lie{color:var(--muted);font-size:.78rem;display:block;margin-top:2px}
-  .al{color:var(--alerte);font-size:.78rem;display:block;margin-top:2px}
-  .cumul{margin-top:14px;padding:12px 14px;border-radius:12px;font-size:.92rem;line-height:1.7;
-    background:color-mix(in srgb,var(--pri) 8%,var(--card));border:1px solid var(--bord)}
-  .err{color:var(--alerte);margin-top:14px;font-size:.9rem}
-  .pied{max-width:960px;margin:0 auto;padding:8px 18px 40px;color:var(--muted);font-size:.8rem;text-align:center}
-  .masque{display:none}
-  @media (max-width:640px){ .hero h1{font-size:1.9rem} .etapes{grid-template-columns:1fr} }
+  .err{color:var(--warn);font-size:.88rem;margin-top:12px}
+  .err:empty{display:none}
+
+  /* Résultats */
+  .resultats{margin-top:22px;background:var(--surface);border:1px solid var(--line);border-radius:20px;box-shadow:var(--ombre);padding:22px}
+  .res-tete{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}
+  .res-tete h2{font-family:var(--f-titre);font-size:1.25rem;margin:0}
+  .res-tete .lie{color:var(--muted);font-size:.84rem}
+  .tels{display:flex;gap:10px;flex-wrap:wrap}
+  .chiffres{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:18px 0}
+  .chiffre{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--surface2)}
+  .chiffre span{display:block;font-size:.74rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600}
+  .chiffre b{font-family:var(--f-chiffre);font-size:1.15rem;font-weight:500;font-variant-numeric:tabular-nums}
+  .verif{display:flex;gap:12px;align-items:center;flex-wrap:wrap;border-radius:12px;padding:11px 14px;margin-bottom:12px;
+    background:var(--pri-doux);font-size:.9rem}
+  .verif .pill{margin-left:auto;font-size:.78rem;font-weight:600;border-radius:999px;padding:3px 10px;background:var(--surface);color:var(--pri-fort);white-space:nowrap}
+  .verif .pill.encours{color:var(--muted)}
+  .table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
+  table{width:100%;border-collapse:collapse;font-size:.88rem;min-width:760px}
+  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  thead th{background:var(--surface2);color:var(--muted);font-weight:600;font-size:.74rem;letter-spacing:.06em;text-transform:uppercase}
+  th.num{text-align:right} td.date{white-space:nowrap}
+  td.num{text-align:right;font-family:var(--f-chiffre);font-variant-numeric:tabular-nums;white-space:nowrap}
+  tbody tr:last-child td{border-bottom:0}
+  .sous{color:var(--muted);font-size:.78rem;display:block;margin-top:2px}
+  .al{color:var(--warn);font-size:.78rem;display:block;margin-top:2px}
+  select.choix{font:inherit;font-size:.86rem;width:100%;min-width:220px;padding:7px 9px;border:1px solid var(--line);
+    border-radius:9px;background:var(--surface);color:var(--ink)}
+  select.choix.vide{border-color:var(--warn);background:var(--warn-doux)}
+  .marque{font-size:.74rem;color:var(--muted);display:block;margin-top:3px}
+  .marque.modif{color:var(--pri-fort);font-weight:600}
+  .cumul{margin-top:14px;font-size:.88rem;line-height:1.7;color:var(--muted)}
+  .cumul b{color:var(--ink);font-family:var(--f-chiffre);font-weight:500}
+
+  /* Comment ça marche + offre */
+  .comment{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:30px}
+  .pas{display:grid;gap:4px;font-size:.9rem}
+  .pas .n{font-family:var(--f-chiffre);color:var(--acc);font-size:.8rem}
+  .pas b{font-family:var(--f-titre)} .pas span{color:var(--muted)}
+  .offre{margin-top:30px;border-radius:20px;padding:24px;display:flex;gap:20px;align-items:center;justify-content:space-between;
+    flex-wrap:wrap;background:var(--ink);color:var(--surface)}
+  .offre>div{flex:1 1 320px;min-width:0}
+  .offre .surtitre{color:var(--acc)}
+  .offre h3{font-family:var(--f-titre);font-size:1.25rem;margin:4px 0 6px}
+  .offre p{margin:0;opacity:.8;font-size:.92rem}
+  .offre .btn{background:var(--surface);color:var(--ink)}
+  .pied{color:var(--muted);font-size:.8rem;text-align:center;padding-block:28px 40px}
+
+  @media (max-width:860px){
+    body.comptable .etapes{grid-template-columns:1fr}
+    .comment{grid-template-columns:1fr}
+  }
+  @media (max-width:640px){
+    /* Sur téléphone, chaque pièce devient une fiche : le compte reste visible. */
+    table{min-width:0} thead{display:none}
+    tbody tr{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;padding:14px;border-bottom:1px solid var(--line)}
+    tbody tr:last-child{border-bottom:0}
+    td{border:0;padding:0;min-width:0} td.num{text-align:left} td.num:empty{display:none}
+    td::before{content:attr(data-l);display:block;font:600 .68rem var(--f-texte);color:var(--muted);
+      text-transform:uppercase;letter-spacing:.06em}
+    td.plein{grid-column:1/-1} select.choix{min-width:0}
+    .tels{width:100%} .tels .btn{flex:1 1 auto;justify-content:center}
+  }
+  @media (max-width:560px){
+    .modes{grid-template-columns:1fr} .mode+.mode{border-left:0;border-top:1px solid var(--line)}
+    .statut span:last-child{display:none} .corps{padding:16px} .quota-note{margin-left:0}
+  }
 </style>
 </head>
 <body>
-  <div class="barre">
-    <div class="logo">
-      <svg class="mark" viewBox="0 0 44 44" width="38" height="38" aria-hidden="true">
-        <rect x="2" y="2" width="40" height="40" rx="12" fill="var(--pri)"/>
-        <path d="M12 11h10.5a2 2 0 0 1 2 2v16l-2.1-1.5-2.1 1.5-2.1-1.5-2.1 1.5-2.1-1.5-1.9 1.35V13a2 2 0 0 1 2-2z" fill="#fff"/>
-        <rect x="14.4" y="15.2" width="7.5" height="1.7" rx=".85" fill="var(--pri)"/>
-        <rect x="14.4" y="18.6" width="5.5" height="1.7" rx=".85" fill="var(--pri)"/>
-        <rect x="24" y="22" width="8.5" height="8.5" rx="2" fill="var(--acc)"/>
-        <path d="M28.25 22v8.5M24 26.25h8.5" stroke="#fff" stroke-width="1.1"/>
-      </svg>
-      <span class="nom">Factur<b>o</b></span>
-    </div>
-    <div class="droite">
-      <span class="statut"><span id="pastille" class="pastille"></span><span id="txtStatut" data-i18n="statut_check">Vérification…</span></span>
-      <div class="lang">
-        <button id="fr" class="actif" onclick="setLang('fr')">FR</button>
-        <button id="en" onclick="setLang('en')">EN</button>
-      </div>
+<header class="conteneur barre">
+  <a class="logo" href="/">
+    <svg viewBox="0 0 44 44" width="34" height="34" aria-hidden="true">
+      <rect x="2" y="2" width="40" height="40" rx="12" fill="var(--pri)"/>
+      <path d="M12 11h10.5a2 2 0 0 1 2 2v16l-2.1-1.5-2.1 1.5-2.1-1.5-2.1 1.5-2.1-1.5-1.9 1.35V13a2 2 0 0 1 2-2z" fill="#fff"/>
+      <rect x="14.4" y="15.2" width="7.5" height="1.7" rx=".85" fill="var(--pri)"/>
+      <rect x="14.4" y="18.6" width="5.5" height="1.7" rx=".85" fill="var(--pri)"/>
+      <rect x="24" y="22" width="8.5" height="8.5" rx="2" fill="var(--acc)"/>
+      <path d="M28.25 22v8.5M24 26.25h8.5" stroke="#fff" stroke-width="1.1"/>
+    </svg>
+    <span>Factur<b>o</b></span>
+  </a>
+  <div class="droite">
+    <span class="statut"><span id="pastille" class="pastille"></span><span id="txtStatut" data-i18n="statut_check">Vérification…</span></span>
+    <div class="lang">
+      <button id="fr" class="actif" onclick="setLang('fr')">FR</button>
+      <button id="en" onclick="setLang('en')">EN</button>
     </div>
   </div>
+</header>
 
-  <div class="wrap">
-    <div class="hero">
-      <h1><span data-i18n="hero1">Vos factures et reçus,</span><br>
-          <span class="surligne" data-i18n="hero2">en Excel — d'une photo.</span></h1>
-      <p data-i18n="sous">Déposez une photo ou un PDF. Vous récupérez un tableur propre, prêt pour la compta — en quelques secondes.</p>
+<main class="conteneur">
+  <section class="hero">
+    <span class="surtitre" data-i18n="surtitre">Bilingue · TPS, TVQ, TVH · QuickBooks Online</span>
+    <h1 data-i18n="hero">Vos reçus et factures, en Excel prêt pour la comptabilité.</h1>
+    <p data-i18n="sous">Déposez des photos ou des PDF. Facturo lit le fournisseur, la date, les taxes et les montants, puis range chaque pièce dans le bon compte.</p>
+  </section>
+
+  <section class="atelier">
+    <div class="modes" role="tablist">
+      <button class="mode" id="modeSimple" role="tab" aria-selected="true" onclick="choisirMode('simple')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h9l3 3v15l-2-1.3-2 1.3-2-1.3-2 1.3-2-1.3L6 21z"/><path d="M9 9h6M9 13h4"/></svg>
+        <div><b data-i18n="mode_simple">Usage simple</b><span data-i18n="mode_simple_d">Déposez vos reçus, téléchargez l'Excel.</span></div>
+      </button>
+      <button class="mode" id="modeComptable" role="tab" aria-selected="false" onclick="choisirMode('comptable')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5M9 8h6M9 12h6"/></svg>
+        <div><b data-i18n="mode_comptable">Mode comptable</b><span data-i18n="mode_comptable_d">Votre plan comptable, vérification des comptes, QuickBooks, relevé bancaire.</span></div>
+      </button>
     </div>
 
-    <div class="carte p24">
-      <div id="zone">
-        <div class="cercle">
-          <svg viewBox="0 0 24 24" fill="none" stroke="var(--pri)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 16V4M8 8l4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+    <div class="corps">
+      <div class="etapes">
+        <!-- 1. Plan comptable (mode comptable) -->
+        <div class="etape seul-comptable">
+          <div class="etape-tete"><span class="n">1</span><h2 data-i18n="e_plan">Votre plan comptable</h2></div>
+          <p class="aide" data-i18n="plan_aide">Excel ou CSV avec une colonne code (ex. 5210) et une colonne nom. Chaque pièce sera rangée dans un compte de CE plan, et vous pourrez corriger avant de télécharger.</p>
+          <div id="planZone" class="zone petite" tabindex="0" role="button">
+            <div class="gros" data-i18n="plan_depot">Déposer mon plan comptable</div>
+            <div class="petit">.xlsx · .csv</div>
+            <input id="planInput" type="file" accept=".xlsx,.csv" class="masque">
+          </div>
+          <div id="planEtat" class="plan-etat"></div>
         </div>
-        <div class="gros" data-i18n="drop_gros">Glissez vos fichiers ici</div>
-        <div class="petit" data-i18n="drop_petit">ou cliquez pour choisir — photos (JPG, PNG, HEIC…) et PDF, plusieurs à la fois</div>
-        <input id="input" type="file" multiple accept=".pdf,image/*,.heic,.heif" class="masque">
-      </div>
-      <ul id="liste" class="fichiers"></ul>
 
-      <details id="avance" class="avance">
-        <summary><span data-i18n="av_titre">Options pour comptables</span>
-          <span class="base-hint" data-i18n="av_hint">plan comptable, ajout à un Excel existant, relevé bancaire, export QuickBooks — facultatif</span></summary>
-      <div class="base-zone">
-        <label class="base-btn">
-          <input id="baseInput" type="file" accept=".xlsx" class="masque">
-          <span>＋ <span data-i18n="base_btn">Ajouter à un Excel existant</span></span>
-        </label>
-        <span class="base-hint" data-i18n="base_hint">optionnel — les nouvelles lignes s'ajoutent à la fin de votre fichier</span>
-        <div id="baseNom" class="base-nom masque"></div>
+        <!-- 2. Pièces (toujours) -->
+        <div class="etape">
+          <div class="etape-tete"><span class="n">2</span><h2 data-i18n="e_pieces">Vos pièces</h2></div>
+          <div id="zone" class="zone" tabindex="0" role="button">
+            <div class="ico"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4M8 8l4-4 4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div>
+            <div class="gros" data-i18n="drop_gros">Glissez vos reçus et factures ici</div>
+            <div class="petit" data-i18n="drop_petit">ou cliquez pour choisir · photos (JPG, PNG, HEIC) et PDF, plusieurs à la fois</div>
+            <input id="input" type="file" multiple accept=".pdf,image/*,.heic,.heif" class="masque">
+          </div>
+          <ul id="liste" class="fichiers"></ul>
+        </div>
+
+        <!-- 3. Options (mode comptable) -->
+        <div class="etape seul-comptable">
+          <div class="etape-tete"><span class="n">3</span><h2 data-i18n="e_options">Options</h2></div>
+          <label class="option" id="optQbo">
+            <input id="qboInput" type="checkbox" class="interrupteur">
+            <div><b data-i18n="qbo_coche">Fichier d'import QuickBooks Online</b><span class="aide" data-i18n="qbo_hint">CSV de factures fournisseurs, en plus de l'Excel, avec le compte et le code de taxe de chaque ligne.</span></div>
+          </label>
+          <label class="option" id="optBase">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 21V9"/></svg>
+            <div><b data-i18n="base_btn">Ajouter à un Excel existant</b><span class="aide" data-i18n="base_hint">Les nouvelles lignes s'ajoutent à la fin de votre classeur Facturo.</span><span id="baseNom" class="nomfic"></span></div>
+            <input id="baseInput" type="file" accept=".xlsx" class="masque">
+          </label>
+          <label class="option" id="optReleve">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10l9-6 9 6M5 10v8M19 10v8M9 10v8M15 10v8M3 20h18"/></svg>
+            <div><b data-i18n="releve_btn">Rapprocher un relevé bancaire</b><span class="aide" data-i18n="releve_hint">CSV ou OFX de votre banque : repère les dépenses sans pièce.</span><span id="releveNom" class="nomfic"></span></div>
+            <input id="releveInput" type="file" accept=".csv,.ofx,.qfx" class="masque">
+          </label>
+        </div>
       </div>
-      <div class="base-zone">
-        <label class="base-btn">
-          <input id="planInput" type="file" accept=".xlsx,.csv" class="masque">
-          <span>＋ <span data-i18n="plan_btn">Importer mon plan comptable</span></span>
-        </label>
-        <span class="base-hint" data-i18n="plan_hint">optionnel — Excel ou CSV ; sinon un plan standard est utilisé pour catégoriser</span>
-        <div id="planNom" class="base-nom masque"></div>
-      </div>
-      <div class="base-zone">
-        <label class="base-btn">
-          <input id="releveInput" type="file" accept=".csv,.ofx,.qfx" class="masque">
-          <span>＋ <span data-i18n="releve_btn">Importer un relevé bancaire</span></span>
-        </label>
-        <span class="base-hint" data-i18n="releve_hint">optionnel — CSV ou OFX de votre banque ; rapproche les transactions de vos factures</span>
-        <div id="releveNom" class="base-nom masque"></div>
-      </div>
-      <label class="coche">
-        <input id="qboInput" type="checkbox">
-        <span><b data-i18n="qbo_coche">Préparer aussi un fichier d'import QuickBooks Online</b><br>
-        <span class="base-hint" data-i18n="qbo_hint">CSV de factures fournisseurs, en plus de l'Excel — pour ne plus ressaisir vos pièces à la main</span></span>
-      </label>
-      </details>
 
       <div class="actions">
         <button id="btn" class="btn pri" disabled data-i18n="btn">Convertir en Excel</button>
         <span id="etat" class="etat"></span>
+        <span id="quotaNote" class="quota-note masque"></span>
       </div>
-      <div id="quotaNote" class="quota-note masque"></div>
       <div id="erreurs" class="err"></div>
+    </div>
+  </section>
 
-      <div class="etapes">
-        <div class="etape"><div class="n">1</div><div><b data-i18n="e1t">Déposez</b><span data-i18n="e1d">Photo ou PDF, en lot.</span></div></div>
-        <div class="etape"><div class="n">2</div><div><b data-i18n="e2t">On lit tout</b><span data-i18n="e2d">Fournisseur, dates, taxes, lignes.</span></div></div>
-        <div class="etape"><div class="n">3</div><div><b data-i18n="e3t">Téléchargez</b><span data-i18n="e3d">Un Excel propre, prêt pour la compta.</span></div></div>
+  <section id="resultats" class="resultats masque" aria-live="polite">
+    <div class="res-tete">
+      <div><h2 id="titreRes" data-i18n="res">Résultat</h2><span id="ajouteNote" class="lie"></span></div>
+      <div class="tels">
+        <a id="tel" class="btn pri" href="#"><span aria-hidden="true">↓</span><span data-i18n="tel">Télécharger l'Excel</span></a>
+        <a id="telQbo" class="btn sec masque" href="#"><span aria-hidden="true">↓</span><span data-i18n="tel_qbo">CSV QuickBooks Online</span></a>
       </div>
     </div>
-
-    <div id="resultats" class="resultats masque">
-      <div class="carte p24">
-        <div class="res-tete">
-          <div><h2 id="titreRes" data-i18n="res">Résultat</h2><span id="ajouteNote" class="lie"></span></div>
-          <div class="tels">
-            <a id="tel" class="tel" href="#"><span>⬇</span><span data-i18n="tel">Télécharger l'Excel</span></a>
-            <a id="telQbo" class="tel2 masque" href="#" title=""><span>⬇</span><span data-i18n="tel_qbo">CSV QuickBooks Online</span></a>
-          </div>
-        </div>
-        <div style="overflow-x:auto"><table id="tab"></table></div>
-        <div id="cumul" class="cumul masque"></div>
-      </div>
+    <div id="chiffres" class="chiffres"></div>
+    <div id="verif" class="verif masque">
+      <span data-i18n="verif_txt">Vérifiez le compte proposé pour chaque pièce. Chaque changement met à jour l'Excel et le fichier QuickBooks.</span>
+      <span id="verifEtat" class="pill"></span>
     </div>
+    <div class="table-wrap"><table id="tab"></table></div>
+    <div id="cumul" class="cumul masque"></div>
+  </section>
 
-    <div id="offre" class="carte offre">
-      <div>
-        <div class="offre-tag" data-i18n="offre_tag">Facturo Pro</div>
-        <h3 data-i18n="offre_titre">Une version sur mesure pour votre entreprise</h3>
-        <p data-i18n="offre_texte">Plus de volume, votre plan comptable et vos fichiers Excel existants, un format adapté à votre logiciel comptable, un accès privé pour votre équipe. Conçu et accompagné par un consultant bilingue basé à Ottawa.</p>
-      </div>
-      <a id="offreLien" class="btn pri offre-btn" href="#" data-i18n="offre_btn">Discuter de mon besoin</a>
+  <section class="comment">
+    <div class="pas"><span class="n">01</span><b data-i18n="p1t">Déposez</b><span data-i18n="p1d">Photos ou PDF, en lot, en français ou en anglais.</span></div>
+    <div class="pas"><span class="n">02</span><b data-i18n="p2t">Facturo lit tout</b><span data-i18n="p2d">Fournisseur, date, TPS, TVQ ou TVH, lignes, compte comptable.</span></div>
+    <div class="pas"><span class="n">03</span><b data-i18n="p3t">Vérifiez et téléchargez</b><span data-i18n="p3d">Un Excel propre, et en option un fichier pour QuickBooks Online.</span></div>
+  </section>
+
+  <section id="offre" class="offre">
+    <div>
+      <span class="surtitre" data-i18n="offre_tag">Facturo Pro</span>
+      <h3 data-i18n="offre_titre">Une version sur mesure pour votre entreprise</h3>
+      <p data-i18n="offre_texte">Plus de volume, votre plan comptable et vos fichiers Excel existants, un format adapté à votre logiciel comptable, un accès privé pour votre équipe. Conçu et accompagné par un consultant bilingue basé à Ottawa.</p>
     </div>
-  </div>
-
-  <div class="pied"><span data-i18n="pied">Facturo — vos données ne servent qu'à produire votre tableur.</span></div>
+    <a id="offreLien" class="btn" href="#" data-i18n="offre_btn">Discuter de mon besoin</a>
+  </section>
+</main>
+<footer class="conteneur pied"><span data-i18n="pied">Facturo · vos données ne servent qu'à produire votre tableur, et les fichiers sont effacés après une heure.</span></footer>
 
 <script>
 const I18N = {
   fr:{ statut_check:"Vérification…", statut_on:"Service en ligne", statut_off:"Service indisponible",
-    hero1:"Vos factures et reçus,", hero2:"en Excel — d'une photo.",
-    sous:"Déposez une photo ou un PDF. Vous récupérez un tableur propre, prêt pour la compta — en quelques secondes.",
-    drop_gros:"Glissez vos fichiers ici", drop_petit:"ou cliquez pour choisir — photos (JPG, PNG, HEIC…) et PDF, plusieurs à la fois",
-    btn:"Convertir en Excel", traitement:"Lecture en cours…",
-    e1t:"Déposez", e1d:"Photo ou PDF, en lot.", e2t:"On lit tout", e2d:"Fournisseur, dates, taxes, lignes.",
-    e3t:"Téléchargez", e3d:"Un Excel propre, prêt pour la compta.",
-    base_btn:"Ajouter à un Excel existant", base_hint:"optionnel — les nouvelles lignes s'ajoutent à la fin de votre fichier",
-    base_choisi:"Excel de base :", ajoute_note:"Nouvelles lignes ajoutées à votre fichier.",
-    av_titre:"Options pour comptables",
-    qbo_coche:"Préparer aussi un fichier d'import QuickBooks Online",
-    qbo_hint:"CSV de factures fournisseurs, en plus de l'Excel — pour ne plus ressaisir vos pièces à la main",
+    surtitre:"Bilingue · TPS, TVQ, TVH · QuickBooks Online",
+    hero:"Vos reçus et factures, en Excel prêt pour la comptabilité.",
+    sous:"Déposez des photos ou des PDF. Facturo lit le fournisseur, la date, les taxes et les montants, puis range chaque pièce dans le bon compte.",
+    mode_simple:"Usage simple", mode_simple_d:"Déposez vos reçus, téléchargez l'Excel.",
+    mode_comptable:"Mode comptable", mode_comptable_d:"Votre plan comptable, vérification des comptes, QuickBooks, relevé bancaire.",
+    e_plan:"Votre plan comptable", e_pieces:"Vos pièces", e_options:"Options",
+    plan_aide:"Excel ou CSV avec une colonne code (ex. 5210) et une colonne nom. Chaque pièce sera rangée dans un compte de CE plan, et vous pourrez corriger avant de télécharger.",
+    plan_depot:"Déposer mon plan comptable", plan_lecture:"Lecture du plan…",
+    plan_std:"Plan standard Facturo utilisé", plan_std_d:"comptes inspirés du formulaire T2125. Déposez le vôtre pour le remplacer.",
+    plan_ok:"comptes reconnus dans", plan_voir:"Voir les comptes", plan_cacher:"Masquer", plan_retirer:"Retirer",
+    drop_gros:"Glissez vos reçus et factures ici", drop_petit:"ou cliquez pour choisir · photos (JPG, PNG, HEIC) et PDF, plusieurs à la fois",
+    btn:"Convertir en Excel", btn_comptable:"Lire les pièces et proposer les comptes", traitement:"Lecture en cours…",
+    qbo_coche:"Fichier d'import QuickBooks Online", qbo_hint:"CSV de factures fournisseurs, en plus de l'Excel, avec le compte et le code de taxe de chaque ligne.",
+    base_btn:"Ajouter à un Excel existant", base_hint:"Les nouvelles lignes s'ajoutent à la fin de votre classeur Facturo.",
+    releve_btn:"Rapprocher un relevé bancaire", releve_hint:"CSV ou OFX de votre banque : repère les dépenses sans pièce.",
+    choisi:"Fichier :", ajoute_note:"Nouvelles lignes ajoutées à votre fichier.",
     res:"Résultat", tel:"Télécharger l'Excel", tel_qbo:"CSV QuickBooks Online",
-    qbo_aide:"Factures fournisseurs à importer dans QuickBooks Online (Paramètres > Importer des données > Factures) : montants hors taxes, dates JJ/MM/AAAA.", pied:"Facturo — vos données ne servent qu'à produire votre tableur.",
-    th_f:"Fournisseur", th_n:"N°", th_d:"Date", th_ht:"HT", th_tps:"TPS", th_tvq:"TVQ", th_tx:"Taxes", th_ttc:"TTC", th_l:"Lignes",
+    qbo_aide:"Factures fournisseurs à importer dans QuickBooks Online (Paramètres > Importer des données > Factures) : montants hors taxes, dates JJ/MM/AAAA.",
+    verif_txt:"Vérifiez le compte proposé pour chaque pièce. Chaque changement met à jour l'Excel et le fichier QuickBooks.",
+    v_ajour:"Excel à jour", v_encours:"Mise à jour…", v_erreur:"Échec de la mise à jour, réessayez",
+    suggere:"proposé par Facturo", modifie:"choisi par vous", a_choisir:"— Choisir un compte —",
+    k_pieces:"Pièces", k_total:"Total TTC", k_taxes:"Taxes", k_ht:"Hors taxes",
+    th_f:"Fournisseur", th_d:"Date", th_ht:"HT", th_tps:"TPS", th_tvq:"TVQ", th_tx:"Taxes", th_ttc:"TTC", th_cat:"Compte",
     regroupe:"regroupé avec", pieces:"pièce(s)", aucune:"Aucune donnée n'a pu être extraite.", reseau:"Erreur réseau : ",
     quota:"Limite de la démo atteinte pour aujourd'hui. Revenez demain !",
-    gratuit:"Version gratuite", par_jour:"fichiers par jour", restants:"restant(s) aujourd'hui",
-    plus:"Besoin de plus ?", voir_pro:"Découvrir Facturo Pro",
+    gratuit:"Version gratuite", par_jour:"fichiers par jour", restants:"restant(s) aujourd'hui", voir_pro:"Facturo Pro",
+    p1t:"Déposez", p1d:"Photos ou PDF, en lot, en français ou en anglais.",
+    p2t:"Facturo lit tout", p2d:"Fournisseur, date, TPS, TVQ ou TVH, lignes, compte comptable.",
+    p3t:"Vérifiez et téléchargez", p3d:"Un Excel propre, et en option un fichier pour QuickBooks Online.",
     offre_tag:"Facturo Pro", offre_titre:"Une version sur mesure pour votre entreprise",
     offre_texte:"Plus de volume, votre plan comptable et vos fichiers Excel existants, un format adapté à votre logiciel comptable, un accès privé pour votre équipe. Conçu et accompagné par un consultant bilingue basé à Ottawa.",
     offre_btn:"Discuter de mon besoin", mail_sujet:"Facturo Pro — demande d'information",
     mail_corps:"Bonjour,\n\nJ'ai essayé Facturo et j'aimerais en savoir plus sur une version adaptée à mon entreprise.\n\nEntreprise :\nVolume approximatif (factures par mois) :\nLogiciel comptable utilisé :\n\nMerci !",
-    plan_btn:"Importer mon plan comptable", plan_hint:"optionnel — Excel ou CSV ; sinon un plan standard est utilisé pour catégoriser",
-    plan_choisi:"Plan comptable :", th_cat:"Catégorie",
-    av_hint:"plan comptable, ajout à un Excel existant, relevé bancaire, export QuickBooks — facultatif",
-    releve_btn:"Importer un relevé bancaire", releve_hint:"optionnel — CSV ou OFX de votre banque ; rapproche les transactions de vos factures",
-    releve_choisi:"Relevé :", rap_titre:"Relevé bancaire", rap_ok:"transaction(s) rapprochée(s)",
-    rap_sans:"dépense(s) sans pièce", rap_abs:"facture(s) absente(s) du relevé", rap_voir:"détail dans l'onglet Rapprochement", rap_cat:"catégorie suggérée pour",
+    pied:"Facturo · vos données ne servent qu'à produire votre tableur, et les fichiers sont effacés après une heure.",
+    rap_titre:"Relevé bancaire", rap_ok:"transaction(s) rapprochée(s)", rap_sans:"dépense(s) sans pièce",
+    rap_abs:"facture(s) absente(s) du relevé", rap_voir:"détail dans l'onglet Rapprochement", rap_cat:"catégorie suggérée pour",
     cumul:"Total du fichier", dont_taxes:"dont taxes", nb_fact:"facture(s) depuis le début" },
   en:{ statut_check:"Checking…", statut_on:"Service online", statut_off:"Service unavailable",
-    hero1:"Your invoices and receipts,", hero2:"in Excel — from a photo.",
-    sous:"Drop a photo or a PDF. You get a clean spreadsheet, ready for bookkeeping — in seconds.",
-    drop_gros:"Drag your files here", drop_petit:"or click to choose — photos (JPG, PNG, HEIC…) and PDF, several at once",
-    btn:"Convert to Excel", traitement:"Reading…",
-    e1t:"Drop", e1d:"Photo or PDF, in batches.", e2t:"We read it all", e2d:"Vendor, dates, taxes, line items.",
-    e3t:"Download", e3d:"A clean Excel, ready for your books.",
-    base_btn:"Add to an existing Excel", base_hint:"optional — new rows are appended to the end of your file",
-    base_choisi:"Base Excel:", ajoute_note:"New rows appended to your file.",
-    av_titre:"Options for accountants",
-    qbo_coche:"Also prepare a QuickBooks Online import file",
-    qbo_hint:"Bills CSV, in addition to the Excel — no more re-keying your receipts by hand",
+    surtitre:"Bilingual · GST, QST, HST · QuickBooks Online",
+    hero:"Your receipts and invoices, in an accounting-ready Excel file.",
+    sous:"Drop photos or PDFs. Facturo reads the vendor, date, taxes and amounts, then files each document under the right account.",
+    mode_simple:"Simple use", mode_simple_d:"Drop your receipts, download the Excel.",
+    mode_comptable:"Accountant mode", mode_comptable_d:"Your chart of accounts, account review, QuickBooks, bank statement.",
+    e_plan:"Your chart of accounts", e_pieces:"Your documents", e_options:"Options",
+    plan_aide:"Excel or CSV with a code column (e.g. 5210) and a name column. Each document is filed under an account from THIS chart, and you can correct it before downloading.",
+    plan_depot:"Drop my chart of accounts", plan_lecture:"Reading the chart…",
+    plan_std:"Facturo standard chart in use", plan_std_d:"accounts based on form T2125. Drop yours to replace it.",
+    plan_ok:"accounts recognized in", plan_voir:"See the accounts", plan_cacher:"Hide", plan_retirer:"Remove",
+    drop_gros:"Drag your receipts and invoices here", drop_petit:"or click to choose · photos (JPG, PNG, HEIC) and PDF, several at once",
+    btn:"Convert to Excel", btn_comptable:"Read the documents and suggest accounts", traitement:"Reading…",
+    qbo_coche:"QuickBooks Online import file", qbo_hint:"Bills CSV, in addition to the Excel, with the account and tax code on each line.",
+    base_btn:"Add to an existing Excel", base_hint:"New rows are appended to the end of your Facturo workbook.",
+    releve_btn:"Reconcile a bank statement", releve_hint:"CSV or OFX from your bank: flags expenses without a receipt.",
+    choisi:"File:", ajoute_note:"New rows appended to your file.",
     res:"Result", tel:"Download the Excel", tel_qbo:"QuickBooks Online CSV",
-    qbo_aide:"Bills to import into QuickBooks Online (Settings > Import data > Bills): amounts exclude tax, dates DD/MM/YYYY.", pied:"Facturo — your data is only used to produce your spreadsheet.",
-    th_f:"Vendor", th_n:"No.", th_d:"Date", th_ht:"Net", th_tps:"GST", th_tvq:"QST", th_tx:"Tax", th_ttc:"Total", th_l:"Items",
-    regroupe:"merged with", pieces:"item(s)", aucune:"No data could be extracted.", reseau:"Network error: ",
+    qbo_aide:"Bills to import into QuickBooks Online (Settings > Import data > Bills): amounts exclude tax, dates DD/MM/YYYY.",
+    verif_txt:"Check the suggested account for each document. Every change updates the Excel and the QuickBooks file.",
+    v_ajour:"Excel up to date", v_encours:"Updating…", v_erreur:"Update failed, please try again",
+    suggere:"suggested by Facturo", modifie:"chosen by you", a_choisir:"— Choose an account —",
+    k_pieces:"Documents", k_total:"Total", k_taxes:"Tax", k_ht:"Before tax",
+    th_f:"Vendor", th_d:"Date", th_ht:"Net", th_tps:"GST", th_tvq:"QST", th_tx:"Tax", th_ttc:"Total", th_cat:"Account",
+    regroupe:"merged with", pieces:"document(s)", aucune:"No data could be extracted.", reseau:"Network error: ",
     quota:"Today's demo limit has been reached. Please come back tomorrow!",
-    gratuit:"Free version", par_jour:"files per day", restants:"left today",
-    plus:"Need more?", voir_pro:"Discover Facturo Pro",
+    gratuit:"Free version", par_jour:"files per day", restants:"left today", voir_pro:"Facturo Pro",
+    p1t:"Drop", p1d:"Photos or PDFs, in batches, in English or French.",
+    p2t:"Facturo reads it all", p2d:"Vendor, date, GST, QST or HST, line items, account.",
+    p3t:"Review and download", p3d:"A clean Excel, and optionally a file for QuickBooks Online.",
     offre_tag:"Facturo Pro", offre_titre:"A custom version for your business",
     offre_texte:"More volume, your chart of accounts and existing Excel files, output tailored to your accounting software, private access for your team. Built and supported by a bilingual consultant based in Ottawa.",
     offre_btn:"Discuss my needs", mail_sujet:"Facturo Pro — information request",
     mail_corps:"Hello,\n\nI tried Facturo and would like to learn more about a version tailored to my business.\n\nCompany:\nApproximate volume (invoices per month):\nAccounting software used:\n\nThank you!",
-    plan_btn:"Import my chart of accounts", plan_hint:"optional — Excel or CSV; otherwise a standard chart is used to categorize",
-    plan_choisi:"Chart of accounts:", th_cat:"Category",
-    av_hint:"chart of accounts, append to an existing Excel, bank statement, QuickBooks export — optional",
-    releve_btn:"Import a bank statement", releve_hint:"optional — CSV or OFX from your bank; matches transactions to your invoices",
-    releve_choisi:"Statement:", rap_titre:"Bank statement", rap_ok:"transaction(s) matched",
-    rap_sans:"expense(s) without a receipt", rap_abs:"invoice(s) not on the statement", rap_voir:"details in the Bank reconciliation sheet", rap_cat:"suggested category for",
+    pied:"Facturo · your data is only used to produce your spreadsheet, and files are deleted after one hour.",
+    rap_titre:"Bank statement", rap_ok:"transaction(s) matched", rap_sans:"expense(s) without a receipt",
+    rap_abs:"invoice(s) not on the statement", rap_voir:"details in the Bank reconciliation sheet", rap_cat:"suggested category for",
     cumul:"File total", dont_taxes:"incl. tax", nb_fact:"invoice(s) since the start" }
 };
-let LANG = localStorage.getItem('facturo_lang') || (navigator.language||'fr').slice(0,2);
+function lire(k){try{return localStorage.getItem(k);}catch(e){return null;}}
+function ecrire(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+let LANG = lire('facturo_lang') || (navigator.language||'fr').slice(0,2);
 if(LANG!=='en') LANG='fr';
-let dernier = null;   // dernier résultat, pour re-rendre au changement de langue
+let MODE = location.hash==='#comptable' ? 'comptable' : (lire('facturo_mode')||'simple');
+let dernier=null, choixInitiaux={};
 
 function T(k){return (I18N[LANG]&&I18N[LANG][k])||k;}
 // Tout texte venant d'un fichier (nom, contenu lu) est échappé avant affichage.
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+const $=id=>document.getElementById(id);
+
 function setLang(l){
-  LANG=l; localStorage.setItem('facturo_lang',l);
-  document.documentElement.lang=l;
-  document.getElementById('fr').classList.toggle('actif',l==='fr');
-  document.getElementById('en').classList.toggle('actif',l==='en');
+  LANG=l; ecrire('facturo_lang',l); document.documentElement.lang=l;
+  $('fr').classList.toggle('actif',l==='fr'); $('en').classList.toggle('actif',l==='en');
   document.querySelectorAll('[data-i18n]').forEach(e=>{const k=e.getAttribute('data-i18n');if(I18N[l][k])e.textContent=I18N[l][k];});
-  majStatut(); rendreBase(); rendrePlan(); rendreReleve(); if(typeof majOffre==='function') majOffre(); if(dernier) afficher(dernier);
+  if(!planComptes) chargerPlanStandard();
+  majStatut(); majBouton(); rendrePlan(); rendreOptions(); majOffre(); if(dernier) afficher(dernier,false);
+}
+function choisirMode(m){
+  MODE=m; ecrire('facturo_mode',m);
+  document.body.classList.toggle('comptable',m==='comptable');
+  $('modeSimple').setAttribute('aria-selected',m==='simple');
+  $('modeComptable').setAttribute('aria-selected',m==='comptable');
+  if(m==='comptable'&&location.hash!=='#comptable') history.replaceState(null,'','#comptable');
+  if(m==='simple'&&location.hash) history.replaceState(null,'',location.pathname);
+  majBouton(); if(dernier) afficher(dernier,false);
 }
 
-const input=document.getElementById('input'), zone=document.getElementById('zone'),
-      liste=document.getElementById('liste'), btn=document.getElementById('btn'),
-      etat=document.getElementById('etat'), res=document.getElementById('resultats'),
-      tab=document.getElementById('tab'), tel=document.getElementById('tel'),
-      errBox=document.getElementById('erreurs');
-let fichiers=[], statutPret=null;
-
+let statutPret=null, quota=null, restant=null, contact='';
 function majStatut(){
-  const p=document.getElementById('pastille'), t=document.getElementById('txtStatut');
+  const p=$('pastille'), t=$('txtStatut');
   if(statutPret===null){t.textContent=T('statut_check');p.className='pastille';}
   else if(statutPret){t.textContent=T('statut_on');p.className='pastille on';}
   else{t.textContent=T('statut_off');p.className='pastille off';}
 }
-let quota=null, restant=null, contact='';
 fetch('/api/statut').then(r=>r.json()).then(s=>{statutPret=!!s.pret;quota=s.quota;restant=s.restant;contact=s.contact||'';majStatut();majOffre();}).catch(()=>{statutPret=false;majStatut();});
 function majOffre(){
-  const q=document.getElementById('quotaNote');
+  const q=$('quotaNote');
   if(quota!==null&&quota!==undefined){
     q.classList.remove('masque');
-    q.innerHTML=`${T('gratuit')} · ${quota} ${T('par_jour')} · <b>${restant}</b> ${T('restants')} · ${T('plus')} <a href="#offre">${T('voir_pro')}</a>`;
+    q.innerHTML=`${T('gratuit')} · ${quota} ${T('par_jour')} · <b>${restant}</b> ${T('restants')} · <a href="#offre">${T('voir_pro')}</a>`;
   }
-  const l=document.getElementById('offreLien');
-  if(contact) l.href=`mailto:${contact}?subject=${encodeURIComponent(T('mail_sujet'))}&body=${encodeURIComponent(T('mail_corps'))}`;
+  if(contact) $('offreLien').href=`mailto:${contact}?subject=${encodeURIComponent(T('mail_sujet'))}&body=${encodeURIComponent(T('mail_corps'))}`;
 }
 
-zone.onclick=()=>input.click();
-['dragover','dragenter'].forEach(e=>zone.addEventListener(e,ev=>{ev.preventDefault();zone.classList.add('survol')}));
-['dragleave','drop'].forEach(e=>zone.addEventListener(e,ev=>{ev.preventDefault();zone.classList.remove('survol')}));
-zone.addEventListener('drop',ev=>ajouter(ev.dataTransfer.files));
-input.addEventListener('change',()=>ajouter(input.files));
-function ajouter(fl){for(const f of fl)fichiers.push(f);rendreListe();}
-function retirer(i){fichiers.splice(i,1);rendreListe();}
-
-let baseExcel=null;
-const baseInput=document.getElementById('baseInput'), baseNom=document.getElementById('baseNom');
-baseInput.addEventListener('change',()=>{ if(baseInput.files[0]){baseExcel=baseInput.files[0];rendreBase();} });
-function retirerBase(){baseExcel=null;baseInput.value='';rendreBase();}
-function rendreBase(){
-  if(!baseExcel){baseNom.classList.add('masque');baseNom.innerHTML='';return;}
-  baseNom.classList.remove('masque');
-  baseNom.innerHTML=`<span>📗</span><span>${T('base_choisi')} ${esc(baseExcel.name)}</span><span class="x" title="✕">✕</span>`;
-  baseNom.querySelector('.x').onclick=retirerBase;
+// --- Pièces ---
+let fichiers=[];
+const zone=$('zone'), input=$('input');
+function brancherZone(z, inp, rappel){
+  z.addEventListener('click',()=>inp.click());
+  z.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();inp.click();}});
+  ['dragover','dragenter'].forEach(ev=>z.addEventListener(ev,e=>{e.preventDefault();z.classList.add('survol');}));
+  ['dragleave','drop'].forEach(ev=>z.addEventListener(ev,e=>{e.preventDefault();z.classList.remove('survol');}));
+  z.addEventListener('drop',e=>rappel(e.dataTransfer.files));
+  inp.addEventListener('change',()=>{rappel(inp.files);inp.value='';});
 }
-let planFichier=null;
-const planInput=document.getElementById('planInput'), planNom=document.getElementById('planNom');
-planInput.addEventListener('change',()=>{ if(planInput.files[0]){planFichier=planInput.files[0];rendrePlan();} });
-function rendrePlan(){
-  if(!planFichier){planNom.classList.add('masque');planNom.innerHTML='';return;}
-  planNom.classList.remove('masque');
-  planNom.innerHTML=`<span>🗂️</span><span>${T('plan_choisi')} ${esc(planFichier.name)}</span><span class="x" title="✕">✕</span>`;
-  planNom.querySelector('.x').onclick=()=>{planFichier=null;planInput.value='';rendrePlan();};
-}
-let releveFichier=null;
-const releveInput=document.getElementById('releveInput'), releveNom=document.getElementById('releveNom');
-releveInput.addEventListener('change',()=>{ if(releveInput.files[0]){releveFichier=releveInput.files[0];rendreReleve();} });
-function rendreReleve(){
-  btn.disabled=!fichiers.length&&!releveFichier;
-  if(!releveFichier){releveNom.classList.add('masque');releveNom.innerHTML='';return;}
-  releveNom.classList.remove('masque');
-  releveNom.innerHTML=`<span>🏦</span><span>${T('releve_choisi')} ${esc(releveFichier.name)}</span><span class="x" title="✕">✕</span>`;
-  releveNom.querySelector('.x').onclick=()=>{releveFichier=null;releveInput.value='';rendreReleve();};
-}
+brancherZone(zone,input,fl=>{for(const f of fl)fichiers.push(f);rendreListe();});
 function rendreListe(){
-  liste.innerHTML='';
+  const ul=$('liste'); ul.innerHTML='';
   fichiers.forEach((f,i)=>{
+    const ext=((f.name||'').split('.').pop()||'').slice(0,5);
     const li=document.createElement('li');
-    const ic=(f.name||'').toLowerCase().endsWith('.pdf')?'📄':'🖼️';
-    li.innerHTML=`<span class="ico">${ic}</span><span>${esc(f.name)}</span><span class="x" title="✕">✕</span>`;
-    li.querySelector('.x').onclick=()=>retirer(i);
-    liste.appendChild(li);
+    li.innerHTML=`<span class="ext">${esc(ext)}</span><span class="nom">${esc(f.name)}</span><button class="x" aria-label="✕">✕</button>`;
+    li.querySelector('.x').onclick=()=>{fichiers.splice(i,1);rendreListe();};
+    ul.appendChild(li);
   });
-  btn.disabled=!fichiers.length&&!releveFichier;
+  majBouton();
+}
+function majBouton(){
+  const b=$('btn'); b.textContent=MODE==='comptable'?T('btn_comptable'):T('btn');
+  b.disabled=!fichiers.length&&!(MODE==='comptable'&&releveFichier);
 }
 
-btn.onclick=async()=>{
-  if(!fichiers.length&&!releveFichier)return;
-  btn.disabled=true;errBox.textContent='';res.classList.add('masque');
-  etat.innerHTML='<span class="spin"></span> '+T('traitement');
+// --- Plan comptable ---
+let planFichier=null, planComptes=null, planStandard=[], planOuvert=false;
+function chargerPlanStandard(){
+  fetch('/api/plan-standard?langue='+LANG).then(r=>r.json()).then(d=>{planStandard=d.comptes||[];rendrePlan();}).catch(()=>{});
+}
+brancherZone($('planZone'),$('planInput'),async fl=>{
+  const f=fl[0]; if(!f) return;
+  $('planEtat').innerHTML=`<div class="ligne"><span class="spin"></span> ${T('plan_lecture')}</div>`;
+  const fd=new FormData(); fd.append('plan',f,f.name); fd.append('langue',LANG);
+  try{
+    const r=await fetch('/api/plan',{method:'POST',body:fd}); const d=await r.json();
+    if(!r.ok){planFichier=null;planComptes=null;rendrePlan();$('erreurs').textContent='⚠ '+(d.erreur||'');return;}
+    planFichier=f; planComptes=d.comptes; planOuvert=false; $('erreurs').textContent='';
+  }catch(e){planFichier=null;planComptes=null;$('erreurs').textContent=T('reseau')+e;}
+  rendrePlan();
+});
+function rendrePlan(){
+  const el=$('planEtat'), comptes=planComptes||planStandard;
+  el.classList.toggle('fourni',!!planComptes);
+  $('planZone').classList.toggle('masque',!!planComptes);
+  const tete=planComptes
+    ? `<div class="ligne"><b>✓ ${planComptes.length} ${T('plan_ok')}</b><span class="nom">${esc(planFichier.name)}</span><button class="x" id="planRetirer" title="${T('plan_retirer')}">✕</button></div>`
+    : `<div class="ligne"><b>${T('plan_std')}</b><span class="aide">${comptes.length} ${T('plan_std_d')}</span></div>`;
+  const apercu=comptes.slice(0,6).map(c=>`<span class="compte">${c.id!==c.libelle?`<code>${esc(c.id)}</code> `:''}${esc(c.libelle.replace(c.id+' · ',''))}</span>`).join('');
+  const tous=planOuvert?`<div class="tous">${comptes.map(c=>`<div><code>${c.id!==c.libelle?esc(c.id):''}</code><span>${esc(c.libelle.replace(c.id+' · ',''))}</span></div>`).join('')}</div>`:'';
+  el.innerHTML=tete+`<div class="comptes">${apercu}</div><div><button class="lien" id="planVoir">${planOuvert?T('plan_cacher'):T('plan_voir')+' ('+comptes.length+')'}</button></div>`+tous;
+  $('planVoir').onclick=()=>{planOuvert=!planOuvert;rendrePlan();};
+  const x=$('planRetirer'); if(x) x.onclick=()=>{planFichier=null;planComptes=null;rendrePlan();};
+}
+
+// --- Options ---
+let baseExcel=null, releveFichier=null;
+$('baseInput').addEventListener('change',e=>{baseExcel=e.target.files[0]||null;e.target.value='';rendreOptions();});
+$('releveInput').addEventListener('change',e=>{releveFichier=e.target.files[0]||null;e.target.value='';rendreOptions();});
+const qboInput=$('qboInput');
+if(lire('facturo_qbo')==='1') qboInput.checked=true;
+qboInput.addEventListener('change',()=>{ecrire('facturo_qbo',qboInput.checked?'1':'0');rendreOptions();});
+function nomFichier(el,f,vider){
+  el.innerHTML=f?`${T('choisi')} ${esc(f.name)} <button class="x" aria-label="✕">✕</button>`:'';
+  if(f) el.querySelector('.x').onclick=e=>{e.preventDefault();e.stopPropagation();vider();};
+}
+function rendreOptions(){
+  nomFichier($('baseNom'),baseExcel,()=>{baseExcel=null;rendreOptions();});
+  nomFichier($('releveNom'),releveFichier,()=>{releveFichier=null;rendreOptions();});
+  $('optBase').classList.toggle('choisi',!!baseExcel);
+  $('optReleve').classList.toggle('choisi',!!releveFichier);
+  $('optQbo').classList.toggle('choisi',qboInput.checked);
+  majBouton();
+}
+
+// --- Envoi ---
+$('btn').onclick=async()=>{
+  const compta=MODE==='comptable';
+  if(!fichiers.length&&!(compta&&releveFichier)) return;
+  const b=$('btn'), err=$('erreurs'); b.disabled=true; err.textContent=''; $('resultats').classList.add('masque');
+  $('etat').innerHTML='<span class="spin"></span> '+T('traitement');
   const fd=new FormData(); fichiers.forEach(f=>fd.append('fichiers',f,f.name));
-  if(baseExcel)fd.append('base',baseExcel,baseExcel.name);
-  if(planFichier)fd.append('plan',planFichier,planFichier.name);
-  if(releveFichier)fd.append('releve',releveFichier,releveFichier.name);
+  // En usage simple, seules les pièces partent : les options comptables
+  // ne changent jamais l'Excel du flux simple.
+  if(compta){
+    if(baseExcel) fd.append('base',baseExcel,baseExcel.name);
+    if(planFichier) fd.append('plan',planFichier,planFichier.name);
+    if(releveFichier) fd.append('releve',releveFichier,releveFichier.name);
+    if(qboInput.checked) fd.append('qbo','1');
+  }
   fd.append('langue',LANG);
-  if(document.getElementById('qboInput').checked)fd.append('qbo','1');
   try{
     const r=await fetch('/api/extraire',{method:'POST',body:fd});
-    if(r.status===429){dernier=null;restant=0;majOffre();
-      errBox.innerHTML=`${T('quota')} <a href="#offre">${T('voir_pro')} →</a>`;}
-    else{dernier=await r.json(); if(dernier.restant!==undefined){restant=dernier.restant;majOffre();} afficher(dernier);}
-  }catch(e){errBox.textContent=T('reseau')+e;}
-  etat.textContent=''; btn.disabled=false;
+    if(r.status===429){dernier=null;restant=0;majOffre();err.innerHTML=`${T('quota')} <a href="#offre">${T('voir_pro')} →</a>`;}
+    else{dernier=await r.json(); dernier.mode=MODE; choixInitiaux={};
+      (dernier.factures||[]).forEach((f,i)=>choixInitiaux[i]=f.compte);
+      if(dernier.restant!==undefined){restant=dernier.restant;majOffre();} afficher(dernier);}
+  }catch(e){err.textContent=T('reseau')+e;}
+  $('etat').textContent=''; majBouton();
 };
 
 function fmt(x){return(x===null||x===undefined||x==='')?'':Number(x).toLocaleString(LANG==='fr'?'fr-CA':'en-CA',{minimumFractionDigits:2,maximumFractionDigits:2});}
-function afficher(d){
-  errBox.innerHTML=(d.erreurs&&d.erreurs.length)?d.erreurs.map(e=>`⚠ ${esc(e.fichier)} : ${esc(e.message)}`).join('<br>'):'';
-  if(!d.download_id){res.classList.add('masque');if(d.erreurs&&d.erreurs.length){}else errBox.textContent=T('aucune');return;}
-  let h=`<thead><tr><th>${T('th_f')}</th><th>${T('th_n')}</th><th>${T('th_d')}</th>
-    <th>${T('th_ht')}</th><th>${T('th_tps')}</th><th>${T('th_tvq')}</th><th>${T('th_tx')}</th>
-    <th>${T('th_ttc')}</th><th>${T('th_l')}</th><th>${T('th_cat')}</th></tr></thead><tbody>`;
-  d.factures.forEach(f=>{
-    let extra='';
-    if(f.pieces_liees&&f.pieces_liees.length)extra+=`<span class="lie">↻ ${T('regroupe')} ${esc(f.pieces_liees.join(', '))}</span>`;
-    if(f.alertes&&f.alertes.length)extra+=`<span class="al">⚠ ${esc(f.alertes.join(' | '))}</span>`;
-    h+=`<tr><td>${esc(f.fournisseur)||'—'}${extra}</td><td>${esc(f.numero)}</td><td>${esc(f.date)}</td>
-        <td class="num">${fmt(f.total_ht)}</td><td class="num">${fmt(f.tps)}</td><td class="num">${fmt(f.tvq)}</td>
-        <td class="num">${fmt(f.tva)}</td><td class="num">${fmt(f.total_ttc)} ${esc(f.devise)}</td>
-        <td class="num">${f.nb_lignes}</td><td>${esc(f.categorie)}</td></tr>`;
+function somme(l,k){return l.reduce((s,f)=>s+(Number(f[k])||0),0);}
+function afficher(d,defiler=true){
+  const err=$('erreurs'), res=$('resultats');
+  err.innerHTML=(d.erreurs&&d.erreurs.length)?d.erreurs.map(e=>`⚠ ${esc(e.fichier)} : ${esc(e.message)}`).join('<br>'):'';
+  if(!d.download_id){res.classList.add('masque');if(!(d.erreurs&&d.erreurs.length))err.textContent=T('aucune');return;}
+  const compta=d.mode==='comptable', fs=d.factures||[];
+  const devises=[...new Set(fs.map(f=>f.devise).filter(Boolean))], dev=devises.length===1?' '+esc(devises[0]):'';
+  $('chiffres').innerHTML=fs.length?[[T('k_pieces'),fs.length],[T('k_ht'),fmt(somme(fs,'total_ht'))+dev],
+    [T('k_taxes'),fmt(somme(fs,'tva'))+dev],[T('k_total'),fmt(somme(fs,'total_ttc'))+dev]]
+    .map(([k,v])=>`<div class="chiffre"><span>${k}</span><b>${v}</b></div>`).join(''):'';
+  $('verif').classList.toggle('masque',!(compta&&fs.length));
+  if(compta) majVerif('ajour');
+  let h=`<thead><tr><th>${T('th_f')}</th><th>${T('th_d')}</th><th class="num">${T('th_ht')}</th><th class="num">${T('th_tps')}</th>
+    <th class="num">${T('th_tvq')}</th><th class="num">${T('th_tx')}</th><th class="num">${T('th_ttc')}</th><th>${T('th_cat')}</th></tr></thead><tbody>`;
+  fs.forEach((f,i)=>{
+    let extra=f.numero?`<span class="sous">N° ${esc(f.numero)}</span>`:'';
+    if(f.pieces_liees&&f.pieces_liees.length) extra+=`<span class="sous">↻ ${T('regroupe')} ${esc(f.pieces_liees.join(', '))}</span>`;
+    if(f.alertes&&f.alertes.length) extra+=`<span class="al">⚠ ${esc(f.alertes.join(' | '))}</span>`;
+    let cat=esc(f.categorie);
+    if(compta&&d.plan&&d.plan.length){
+      const opts=(f.compte?'':`<option value="">${T('a_choisir')}</option>`)+d.plan.map(c=>
+        `<option value="${esc(c.id)}"${c.id===f.compte?' selected':''}>${esc(c.libelle)}</option>`).join('');
+      const modif=choixInitiaux[i]!==f.compte;
+      cat=`<select class="choix${f.compte?'':' vide'}" data-i="${i}" aria-label="${T('th_cat')}">${opts}</select>`
+        +`<span class="marque${modif?' modif':''}">${f.compte?(modif?T('modifie'):T('suggere')):''}</span>`;
+    }
+    h+=`<tr><td class="plein" data-l="${T('th_f')}">${esc(f.fournisseur)||'—'}${extra}</td><td class="date" data-l="${T('th_d')}">${esc(f.date)}</td>
+        <td class="num" data-l="${T('th_ht')}">${fmt(f.total_ht)}</td><td class="num" data-l="${T('th_tps')}">${fmt(f.tps)}</td><td class="num" data-l="${T('th_tvq')}">${fmt(f.tvq)}</td>
+        <td class="num" data-l="${T('th_tx')}">${fmt(f.tva)}</td><td class="num" data-l="${T('th_ttc')}">${fmt(f.total_ttc)} ${esc(f.devise)}</td><td class="plein" data-l="${T('th_cat')}">${cat}</td></tr>`;
   });
-  tab.innerHTML=d.factures.length?h+'</tbody>':'';
-  document.getElementById('titreRes').textContent=d.factures.length
-    ? `${T('res')} — ${d.factures.length} ${T('pieces')}` : `${T('res')} — ${T('rap_titre')}`;
-  document.getElementById('ajouteNote').textContent=(d.ajoute&&d.factures.length)?('↳ '+T('ajoute_note')):'';
-  const cumul=document.getElementById('cumul'), tot=d.totaux_fichier||[];
-  cumul.innerHTML=tot.map(t=>`Σ ${T('cumul')} : <b>${fmt(t.total_ttc)} ${esc(t.devise)}</b> · ${T('dont_taxes')} ${fmt(t.taxes)} ${esc(t.devise)} · ${t.nb} ${T('nb_fact')}`).join('<br>');
+  $('tab').innerHTML=fs.length?h+'</tbody>':'';
+  $('tab').querySelectorAll('select.choix').forEach(s=>s.addEventListener('change',()=>corriger(+s.dataset.i,s.value)));
+  $('titreRes').textContent=fs.length?`${T('res')} · ${fs.length} ${T('pieces')}`:`${T('res')} · ${T('rap_titre')}`;
+  $('ajouteNote').textContent=(d.ajoute&&fs.length)?('↳ '+T('ajoute_note')):'';
+  const cumul=$('cumul'), tot=d.totaux_fichier||[];
+  cumul.innerHTML=tot.map(t=>`${T('cumul')} : <b>${fmt(t.total_ttc)} ${esc(t.devise)}</b> · ${T('dont_taxes')} ${fmt(t.taxes)} ${esc(t.devise)} · ${t.nb} ${T('nb_fact')}`).join('<br>');
   const rap=d.rapprochement;
-  if(rap) cumul.innerHTML+=(tot.length?'<br>':'')+`🏦 ${T('rap_titre')} : <b>${rap.rapprochees}</b> ${T('rap_ok')} · `
-    +`<b>${rap.sans_piece}</b> ${T('rap_sans')} (${fmt(rap.montant_sans_piece)}${rap.categorisees?`, ${T('rap_cat')} ${rap.categorisees}`:''}) · <b>${rap.absentes}</b> ${T('rap_abs')} — ${T('rap_voir')}`;
+  if(rap) cumul.innerHTML+=(tot.length?'<br>':'')+`${T('rap_titre')} : <b>${rap.rapprochees}</b> ${T('rap_ok')} · `
+    +`<b>${rap.sans_piece}</b> ${T('rap_sans')} (${fmt(rap.montant_sans_piece)}${rap.categorisees?`, ${T('rap_cat')} ${rap.categorisees}`:''}) · <b>${rap.absentes}</b> ${T('rap_abs')} · ${T('rap_voir')}`;
   cumul.classList.toggle('masque',!tot.length&&!rap);
-  const q=document.getElementById('telQbo');
-  q.classList.toggle('masque',!d.qbo);
-  if(d.download_id){tel.href='/telecharger/'+d.download_id;
-    q.href='/telecharger/'+d.download_id+'?format=qbo'; q.title=T('qbo_aide');}
-  res.classList.remove('masque'); res.scrollIntoView({behavior:'smooth',block:'nearest'});
+  const q=$('telQbo'); q.classList.toggle('masque',!d.qbo);
+  $('tel').href='/telecharger/'+d.download_id; q.href='/telecharger/'+d.download_id+'?format=qbo'; q.title=T('qbo_aide');
+  res.classList.remove('masque'); if(defiler) res.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function majVerif(e){const p=$('verifEtat');p.className='pill'+(e==='encours'?' encours':'');
+  p.innerHTML=e==='encours'?`<span class="spin"></span> ${T('v_encours')}`:(e==='erreur'?T('v_erreur'):'✓ '+T('v_ajour'));}
+async function corriger(i,id){
+  if(!dernier||!id) return;
+  majVerif('encours'); const tel=$('tel'); tel.style.pointerEvents='none'; tel.style.opacity=.5;
+  try{
+    const r=await fetch('/api/comptes',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({jeton:dernier.download_id,comptes:{[i]:id}})});
+    if(!r.ok) throw new Error(r.status);
+    const d=await r.json(); dernier.factures=d.factures; dernier.totaux_fichier=d.totaux_fichier;
+    if(d.rapprochement) dernier.rapprochement=d.rapprochement;
+    afficher(dernier,false);
+  }catch(e){majVerif('erreur');}
+  tel.style.pointerEvents=''; tel.style.opacity='';
 }
 
-// Préférences « comptable » mémorisées dans ce navigateur uniquement.
-const avance=document.getElementById('avance'), qboInput=document.getElementById('qboInput');
-try{ if(localStorage.getItem('facturo_qbo')==='1'){qboInput.checked=true;avance.open=true;} }catch(e){}
-qboInput.addEventListener('change',()=>{try{localStorage.setItem('facturo_qbo',qboInput.checked?'1':'0');}catch(e){}});
-setLang(LANG);
+document.body.classList.toggle('comptable',MODE==='comptable');
+choisirMode(MODE); rendreOptions(); setLang(LANG);
 </script>
 </body>
 </html>"""

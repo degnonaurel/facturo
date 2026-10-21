@@ -89,13 +89,13 @@ def test_csv_via_web_seulement_sur_demande(tmp_path):
     assert contenu_excel(simple["download_id"]) == contenu_excel(avec["download_id"])
 
 
-def test_option_quickbooks_repliee_dans_la_page():
+def test_option_quickbooks_dans_le_mode_comptable():
     from fastapi.testclient import TestClient
     import interface_web
     page = TestClient(interface_web.app).get("/").text
-    # Options comptables repliées par défaut ; case QuickBooks décochée.
-    assert '<details id="avance" class="avance">' in page
-    assert '<input id="qboInput" type="checkbox">' in page
+    # Usage simple par défaut ; QuickBooks décoché, réservé au mode comptable.
+    assert 'id="modeSimple" role="tab" aria-selected="true"' in page
+    assert '<input id="qboInput" type="checkbox" class="interrupteur">' in page
     assert "Claude" not in page and "Anthropic" not in page
 
 
