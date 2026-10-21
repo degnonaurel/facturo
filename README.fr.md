@@ -50,15 +50,18 @@ pytest · Docker · déploiement continu sur Render.
 Catégories et totaux sont toujours dans l'Excel, sur des onglets après le
 résumé : un usager courant peut les ignorer. L'import d'un plan comptable,
 l'ajout à un fichier existant, le relevé bancaire et l'export QuickBooks se
-trouvent dans le
-panneau replié *Options pour comptables* de l'app web.
+trouvent dans l'onglet *Mode comptable* de l'app web, à un clic (lien direct :
+`/#comptable`).
 
 - **Ajout à un Excel existant** — les nouvelles lignes s'ajoutent à la fin,
   sans écraser : pour tenir sa compta au fil de l'eau.
 - **Plan comptable** — chaque facture est catégorisée selon votre plan comptable
   (import Excel/CSV) ou un plan standard de PME canadienne ; une colonne
   *Catégorie* avec liste déroulante permet au comptable de vérifier et filtrer,
-  et le plan est enregistré dans le classeur pour les ajouts suivants. Chaque
+  et le plan est enregistré dans le classeur pour les ajouts suivants. L'app
+  web affiche les comptes reconnus dès le dépôt du plan, puis laisse le
+  comptable confirmer ou changer le compte proposé pour chaque pièce avant de
+  télécharger ; l'Excel et le fichier QuickBooks sont refaits avec ses choix. Chaque
   article est aussi catégorisé : un reçu mixte (fournitures + repas) est
   ventilé correctement.
 - **Totaux par catégorie** — un onglet dédié additionne toutes les factures par

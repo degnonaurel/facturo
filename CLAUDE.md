@@ -9,10 +9,12 @@ Excel workbook, for bilingual (English/French) small businesses in Canada.
 Two levels of use, which must never get in each other's way:
 
 - **Everyday use** — drop files, download the Excel. Nothing else on screen.
-- **Accountants** (collapsed *Options for accountants* panel) — chart of
-  accounts, appending to an existing workbook, bank statement reconciliation,
-  QuickBooks Online export. These options never change the Excel produced by
-  the everyday flow.
+- **Accountants** (*Accountant mode* tab, one click away, link `/#comptable`)
+  — chart of accounts with a preview of the accounts recognized, review of the
+  suggested account of each document before download, appending to an
+  existing workbook, bank statement reconciliation, QuickBooks Online export.
+  In simple mode none of these options are sent, so they never change the
+  Excel produced by the everyday flow.
 
 ## Architecture
 
@@ -22,7 +24,7 @@ Three Python modules at the root, no heavy framework:
 |---|---|
 | `facture_vers_excel.py` | Engine: reading (PDF text, vision for photos and scanned PDFs), LLM extraction with a JSON schema, offline fallback, grouping, chart of accounts, Excel output, QuickBooks CSV, CLI. |
 | `releves_bancaires.py` | Bank statements (OFX/QFX and CSV from Canadian banks), reconciliation with invoices, suggested accounts. |
-| `interface_web.py` | FastAPI app serving a self-contained bilingual page; `GET /api/statut`, `POST /api/extraire`, `GET /telecharger/{id}`. |
+| `interface_web.py` | FastAPI app serving a self-contained bilingual page; `GET /api/statut`, `POST /api/extraire`, `POST /api/plan` (chart preview), `POST /api/comptes` (account corrections, rebuilds the files), `GET /telecharger/{id}`. |
 
 The LLM returns `{fournisseur, numero, date, devise, total_ht, tps, tvq, tva,
 total_ttc, lignes[]}`, plus an account (`compte`) per document and per line

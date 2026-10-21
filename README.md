@@ -47,15 +47,18 @@ continuous deployment on Render.
 
 Categories and totals are always in the Excel, on sheets after the summary, so
 everyday users can ignore them. Importing a chart of accounts, appending to an
-existing file, the bank statement and the QuickBooks export sit in the collapsed *Options for
-accountants* panel of the web app.
+existing file, the bank statement and the QuickBooks export sit in the
+*Accountant mode* tab of the web app, one click away (direct link: `/#comptable`).
 
 - **Append to an existing Excel file** — new rows are added at the end, nothing
   is overwritten: keep your books up to date as you go.
 - **Chart of accounts** — each invoice is categorized against your own chart of
   accounts (Excel/CSV import) or a standard Canadian small-business chart; a
   *Category* column with a dropdown lets the accountant review and filter, and
-  the chart is saved in the workbook for the next appends. Each line item is
+  the chart is saved in the workbook for the next appends. The web app shows
+  the accounts recognized as soon as the chart is dropped, then lets the
+  accountant confirm or change the suggested account of each document before
+  downloading; the Excel and the QuickBooks file are rebuilt with those choices. Each line item is
   categorized too, so mixed receipts (supplies + meals) are split correctly.
 - **Totals by category** — a dedicated sheet sums every invoice per account and
   currency (mixed receipts allocated pro rata to their items), rebuilt on every
