@@ -173,3 +173,15 @@ def test_session_effacee_avec_le_fichier(tmp_path, monkeypatch):
     monkeypatch.setattr(interface_web, "DUREE_TELECHARGEMENT", -1)
     interface_web._purger_telechargements()
     assert d["download_id"] not in interface_web._SESSIONS
+
+
+def test_continuer_un_excel_existant_en_usage_simple():
+    """Continuer son Excel fait partie de l'usage courant : l'option est dans
+    l'étape « Vos pièces », visible dans les deux modes, et le fichier part
+    même en usage simple."""
+    page = client.get("/").text
+    pieces = page.index('data-i18n="e_pieces"')
+    options = page.index('data-i18n="e_options"')
+    assert pieces < page.index('id="optBase"') < options
+    envoi = page[page.index("$('btn').onclick"):]
+    assert envoi.index("fd.append('base'") < envoi.index("if(compta)")

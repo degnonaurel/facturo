@@ -592,6 +592,7 @@ _PAGE = r"""<!DOCTYPE html>
   .option b{display:block;font-size:.9rem}
   .option .aide{font-size:.8rem}
   .option svg{flex:0 0 20px;width:20px;height:20px;color:var(--pri);margin-top:1px}
+  .option.continuer{border-style:dashed;padding:9px 12px} .option.continuer.choisi{border-style:solid}
   .option.choisi{border-color:var(--pri);background:var(--pri-doux)}
   .option .nomfic{font-size:.8rem;color:var(--pri-fort);font-weight:600;word-break:break-all}
   .interrupteur{appearance:none;flex:0 0 36px;width:36px;height:20px;border-radius:999px;background:var(--line);position:relative;
@@ -750,6 +751,11 @@ _PAGE = r"""<!DOCTYPE html>
             <input id="input" type="file" multiple accept=".pdf,image/*,.heic,.heif" class="masque">
           </div>
           <ul id="liste" class="fichiers"></ul>
+          <label class="option continuer" id="optBase">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 21V9"/></svg>
+            <div><b data-i18n="base_btn">Continuer un Excel existant</b><span class="aide" data-i18n="base_hint">Facultatif : déposez votre dernier fichier Facturo, les nouvelles pièces s'ajoutent à la suite.</span><span id="baseNom" class="nomfic"></span></div>
+            <input id="baseInput" type="file" accept=".xlsx" class="masque">
+          </label>
         </div>
 
         <!-- 3. Options (mode comptable) -->
@@ -758,11 +764,6 @@ _PAGE = r"""<!DOCTYPE html>
           <label class="option" id="optQbo">
             <input id="qboInput" type="checkbox" class="interrupteur">
             <div><b data-i18n="qbo_coche">Fichier d'import QuickBooks Online</b><span class="aide" data-i18n="qbo_hint">CSV de factures fournisseurs, en plus de l'Excel, avec le compte et le code de taxe de chaque ligne.</span></div>
-          </label>
-          <label class="option" id="optBase">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18M9 21V9"/></svg>
-            <div><b data-i18n="base_btn">Ajouter à un Excel existant</b><span class="aide" data-i18n="base_hint">Les nouvelles lignes s'ajoutent à la fin de votre classeur Facturo.</span><span id="baseNom" class="nomfic"></span></div>
-            <input id="baseInput" type="file" accept=".xlsx" class="masque">
           </label>
           <label class="option" id="optReleve">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10l9-6 9 6M5 10v8M19 10v8M9 10v8M15 10v8M3 20h18"/></svg>
@@ -831,7 +832,7 @@ const I18N = {
     drop_gros:"Glissez vos reçus et factures ici", drop_petit:"ou cliquez pour choisir · photos (JPG, PNG, HEIC) et PDF, plusieurs à la fois",
     btn:"Convertir en Excel", btn_comptable:"Lire les pièces et proposer les comptes", traitement:"Lecture en cours…",
     qbo_coche:"Fichier d'import QuickBooks Online", qbo_hint:"CSV de factures fournisseurs, en plus de l'Excel, avec le compte et le code de taxe de chaque ligne.",
-    base_btn:"Ajouter à un Excel existant", base_hint:"Les nouvelles lignes s'ajoutent à la fin de votre classeur Facturo.",
+    base_btn:"Continuer un Excel existant", base_hint:"Facultatif : déposez votre dernier fichier Facturo, les nouvelles pièces s'ajoutent à la suite.",
     releve_btn:"Rapprocher un relevé bancaire", releve_hint:"CSV ou OFX de votre banque : repère les dépenses sans pièce.",
     choisi:"Fichier :", ajoute_note:"Nouvelles lignes ajoutées à votre fichier.",
     res:"Résultat", tel:"Télécharger l'Excel", tel_qbo:"CSV QuickBooks Online",
@@ -869,7 +870,7 @@ const I18N = {
     drop_gros:"Drag your receipts and invoices here", drop_petit:"or click to choose · photos (JPG, PNG, HEIC) and PDF, several at once",
     btn:"Convert to Excel", btn_comptable:"Read the documents and suggest accounts", traitement:"Reading…",
     qbo_coche:"QuickBooks Online import file", qbo_hint:"Bills CSV, in addition to the Excel, with the account and tax code on each line.",
-    base_btn:"Add to an existing Excel", base_hint:"New rows are appended to the end of your Facturo workbook.",
+    base_btn:"Continue an existing Excel", base_hint:"Optional: drop your latest Facturo file, the new documents are added after the existing ones.",
     releve_btn:"Reconcile a bank statement", releve_hint:"CSV or OFX from your bank: flags expenses without a receipt.",
     choisi:"File:", ajoute_note:"New rows appended to your file.",
     res:"Result", tel:"Download the Excel", tel_qbo:"QuickBooks Online CSV",
@@ -1025,10 +1026,10 @@ $('btn').onclick=async()=>{
   const b=$('btn'), err=$('erreurs'); b.disabled=true; err.textContent=''; $('resultats').classList.add('masque');
   $('etat').innerHTML='<span class="spin"></span> '+T('traitement');
   const fd=new FormData(); fichiers.forEach(f=>fd.append('fichiers',f,f.name));
-  // En usage simple, seules les pièces partent : les options comptables
-  // ne changent jamais l'Excel du flux simple.
+  // L'Excel à continuer fait partie des deux usages. En usage simple, les
+  // options comptables ne partent pas : elles ne changent jamais cet Excel.
+  if(baseExcel) fd.append('base',baseExcel,baseExcel.name);
   if(compta){
-    if(baseExcel) fd.append('base',baseExcel,baseExcel.name);
     if(planFichier) fd.append('plan',planFichier,planFichier.name);
     if(releveFichier) fd.append('releve',releveFichier,releveFichier.name);
     if(qboInput.checked) fd.append('qbo','1');
