@@ -475,214 +475,237 @@ _PAGE = r"""<!DOCTYPE html>
 <title>Facturo — de la photo au tableur</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans:wght@400;500;600&family=Schibsted+Grotesk:wght@600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@100..125,400..800&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
 <style>
-  /* Mise en page : une seule « table de travail » centrale. Deux modes visibles
-     en haut (simple / comptable) ; en mode comptable, trois étapes côte à côte
-     (plan, pièces, options), puis la vérification des comptes pièce par pièce. */
+  /* Direction « blocs en relief » : fond vert d'eau (rappel du tableur),
+     cartes blanches à bordure épaisse et ombre pleine décalée, accent orange
+     pour l'action. Une seule table de travail : deux modes visibles en haut ;
+     en mode comptable, trois étapes côte à côte, puis la vérification des comptes. */
   :root{
-    --bg:#F3F6F5; --surface:#FFFFFF; --surface2:#F8FAF9; --ink:#14201C; --muted:#5D6A65;
-    --line:#DCE4E1; --pri:#0E6E5E; --pri-fort:#0A5849; --pri-doux:#E2F1EC;
-    --acc:#E8673A; --acc-doux:#FCEBE3; --warn:#A3560F; --warn-doux:#FBEEDD;
-    --ombre:0 1px 2px rgba(16,32,28,.05),0 12px 32px rgba(16,32,28,.07);
-    --f-titre:"Schibsted Grotesk","Segoe UI",system-ui,sans-serif;
-    --f-texte:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+    --bg:#CFEBDD; --surface:#FFFFFF; --surface2:#F1F8F4; --ink:#0B2B24; --muted:#2E4A42;
+    --trait:#0B2B24; --line:#B7D6C8; --pri:#0E6E5E; --pri-fort:#0A5849; --pri-doux:#E1F2EA;
+    --acc:#E2552B; --acc-fort:#C7451E; --acc-doux:#FCE6DD; --warn:#9A4A0B; --warn-doux:#FDEBD6;
+    --ombre:6px 6px 0 var(--trait); --ombre-p:3px 3px 0 var(--trait);
+    --f-titre:"Archivo","Segoe UI",system-ui,sans-serif;
+    --f-texte:"Archivo","Segoe UI",system-ui,sans-serif;
     --f-chiffre:"IBM Plex Mono",ui-monospace,Menlo,monospace;
-    --r:14px;
+    --r:16px;
   }
   @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
-    --bg:#0E1412; --surface:#151D1A; --surface2:#19221F; --ink:#E5ECE9; --muted:#93A29C;
-    --line:#26322E; --pri:#3BC1A4; --pri-fort:#5BD3B8; --pri-doux:#15302A;
-    --acc:#FF8A5E; --acc-doux:#3A2219; --warn:#F0AE5E; --warn-doux:#35260F;
-    --ombre:0 1px 2px rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.35); color-scheme:dark }}
+    --bg:#0C1A16; --surface:#132520; --surface2:#172C26; --ink:#E4F3EC; --muted:#A5C2B6;
+    --trait:#000000; --line:#28433A; --pri:#3BC1A4; --pri-fort:#5BD3B8; --pri-doux:#163A31;
+    --acc:#FF7A4D; --acc-fort:#FF956F; --acc-doux:#3A2017; --warn:#F0AE5E; --warn-doux:#35260F; color-scheme:dark }}
   :root[data-theme="dark"]{
-    --bg:#0E1412; --surface:#151D1A; --surface2:#19221F; --ink:#E5ECE9; --muted:#93A29C;
-    --line:#26322E; --pri:#3BC1A4; --pri-fort:#5BD3B8; --pri-doux:#15302A;
-    --acc:#FF8A5E; --acc-doux:#3A2219; --warn:#F0AE5E; --warn-doux:#35260F;
-    --ombre:0 1px 2px rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.35); color-scheme:dark }
+    --bg:#0C1A16; --surface:#132520; --surface2:#172C26; --ink:#E4F3EC; --muted:#A5C2B6;
+    --trait:#000000; --line:#28433A; --pri:#3BC1A4; --pri-fort:#5BD3B8; --pri-doux:#163A31;
+    --acc:#FF7A4D; --acc-fort:#FF956F; --acc-doux:#3A2017; --warn:#F0AE5E; --warn-doux:#35260F; color-scheme:dark }
   *{box-sizing:border-box}
   html,body{margin:0}
   body{font:15px/1.55 var(--f-texte);background:var(--bg);color:var(--ink);min-height:100vh}
   a{color:var(--pri)}
   button{font:inherit}
-  :focus-visible{outline:2px solid var(--pri);outline-offset:2px}
+  :focus-visible{outline:3px solid var(--acc);outline-offset:2px}
   .masque{display:none!important}
-  .conteneur{max-width:1080px;margin:0 auto;padding-left:max(18px,env(safe-area-inset-left,0px));
+  .conteneur{max-width:1100px;margin:0 auto;padding-left:max(18px,env(safe-area-inset-left,0px));
     padding-right:max(18px,env(safe-area-inset-right,0px))}
+  .large{font-stretch:125%}
 
   /* En-tête */
   .barre{display:flex;align-items:center;gap:14px;padding-block:18px}
-  .logo{display:flex;align-items:center;gap:10px;font-family:var(--f-titre);font-weight:700;
-    font-size:1.25rem;letter-spacing:-.02em;text-decoration:none;color:var(--ink)}
-  .logo b{color:var(--pri)}
+  .logo{display:flex;align-items:center;gap:10px;font-family:var(--f-titre);font-stretch:125%;font-weight:800;
+    font-size:1.25rem;text-decoration:none;color:var(--ink)}
   .droite{margin-left:auto;display:flex;align-items:center;gap:14px}
-  .statut{display:inline-flex;align-items:center;gap:7px;font-size:.82rem;color:var(--muted)}
-  .pastille{width:8px;height:8px;border-radius:50%;background:var(--line)}
-  .pastille.on{background:var(--pri)} .pastille.off{background:var(--warn)}
-  .lang{display:flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;font-size:.8rem;font-weight:600}
-  .lang button{border:0;background:transparent;color:var(--muted);padding:6px 12px;cursor:pointer}
+  .statut{display:inline-flex;align-items:center;gap:7px;font-size:.82rem;color:var(--muted);font-weight:600}
+  .pastille{width:9px;height:9px;border-radius:50%;background:var(--line);border:1.5px solid var(--trait)}
+  .pastille.on{background:#2BB673} .pastille.off{background:var(--warn)}
+  .lang{display:flex;border:2px solid var(--trait);border-radius:10px;overflow:hidden;font-size:.8rem;font-weight:700;
+    box-shadow:var(--ombre-p);background:var(--surface)}
+  .lang button{border:0;background:transparent;color:var(--ink);padding:6px 11px;cursor:pointer}
   .lang button.actif{background:var(--ink);color:var(--surface)}
 
-  /* Accroche */
-  .hero{padding-block:22px 26px;display:grid;gap:12px}
-  .surtitre{font-size:.76rem;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--pri)}
-  .hero h1{font-family:var(--f-titre);font-weight:700;font-size:clamp(1.9rem,4.2vw,2.8rem);line-height:1.06;
-    letter-spacing:-.03em;margin:0;text-wrap:balance;max-width:20ch}
-  .hero p{margin:0;color:var(--muted);font-size:1.06rem;max-width:60ch}
+  /* Accroche : texte + illustration en relief */
+  .hero{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:28px;align-items:center;padding-block:18px 30px}
+  .hero-texte{display:grid;gap:14px;align-content:start}
+  .surtitre{font-size:.76rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--pri)}
+  .hero h1{font-family:var(--f-titre);font-stretch:125%;font-weight:800;font-size:clamp(2.1rem,5vw,3.4rem);line-height:1;
+    letter-spacing:-.02em;margin:0;text-wrap:balance}
+  .hero p{margin:0;color:var(--muted);font-size:1.06rem;max-width:52ch}
+  .pas-liste{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:6px}
+  .pas{background:var(--surface);border:2px solid var(--trait);border-radius:12px;padding:12px;display:grid;gap:3px;
+    align-content:start;box-shadow:var(--ombre-p);min-width:0}
+  .pas .n{font-stretch:125%;font-weight:800;color:var(--acc)}
+  .pas b{font-size:.92rem} .pas span:last-child{color:var(--muted);font-size:.84rem;line-height:1.4}
+  .illus{position:relative;height:300px}
+  .illus .recu{position:absolute;left:4%;top:16px;width:46%;max-width:200px;height:250px;background:var(--surface);
+    border:2.5px solid var(--trait);border-radius:14px;transform:rotate(-7deg);box-shadow:8px 8px 0 var(--trait);
+    padding:16px;display:flex;flex-direction:column;gap:9px}
+  .illus .recu i{display:block;height:8px;border-radius:4px;background:var(--line)}
+  .illus .recu i:first-child{height:11px;width:70%;background:var(--ink)}
+  .illus .recu .tx{margin-top:auto;display:flex;justify-content:space-between;font-weight:800;font-size:.85rem}
+  .illus .recu .tx em{font-style:normal;background:var(--acc);color:#fff;padding:1px 7px;border-radius:5px}
+  .illus .feuille{position:absolute;right:2%;bottom:6px;width:56%;max-width:250px;background:var(--surface);
+    border:2.5px solid var(--trait);border-radius:14px;transform:rotate(5deg);box-shadow:8px 8px 0 var(--trait);
+    overflow:hidden;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));font-size:.72rem;font-weight:600}
+  .illus .feuille span{padding:8px 7px;border-top:1.5px solid var(--trait);font-family:var(--f-chiffre);font-weight:500}
+  .illus .feuille span.t{background:var(--pri);color:#fff;border-top:0;font-family:var(--f-texte);font-weight:700}
+  .illus .fleche{position:absolute;left:44%;top:120px;width:56px;height:56px;border-radius:50%;background:var(--acc);
+    border:2.5px solid var(--trait);box-shadow:4px 4px 0 var(--trait);display:grid;place-items:center;color:#fff}
 
   /* Carte de travail */
-  .atelier{background:var(--surface);border:1px solid var(--line);border-radius:20px;box-shadow:var(--ombre);overflow:hidden}
-  .modes{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--line);background:var(--surface2)}
-  .mode{display:flex;gap:12px;align-items:flex-start;text-align:left;border:0;background:transparent;cursor:pointer;
-    padding:16px 20px;color:var(--muted);border-bottom:3px solid transparent;margin-bottom:-1px}
-  .mode+.mode{border-left:1px solid var(--line)}
+  .atelier{background:var(--surface);border:2.5px solid var(--trait);border-radius:20px;box-shadow:var(--ombre);overflow:hidden}
+  .modes{display:grid;grid-template-columns:1fr 1fr;border-bottom:2.5px solid var(--trait)}
+  .mode{display:flex;gap:12px;align-items:flex-start;text-align:left;border:0;background:var(--surface2);cursor:pointer;
+    padding:16px 20px;color:var(--muted)}
+  .mode+.mode{border-left:2.5px solid var(--trait)}
   .mode svg{flex:0 0 22px;width:22px;height:22px;margin-top:2px}
-  .mode b{display:block;font-family:var(--f-titre);font-size:1.02rem;color:var(--ink)}
+  .mode b{display:block;font-stretch:125%;font-weight:800;font-size:1rem;color:var(--ink)}
   .mode span{font-size:.84rem;line-height:1.4}
-  .mode[aria-selected="true"]{background:var(--surface);border-bottom-color:var(--pri);color:var(--muted)}
-  .mode[aria-selected="true"] svg{color:var(--pri)}
-  .mode:not([aria-selected="true"]):hover{background:var(--surface)}
+  .mode[aria-selected="true"]{background:var(--pri);color:#E6F5EE}
+  .mode[aria-selected="true"] b{color:#fff}
+  .mode:not([aria-selected="true"]):hover{background:var(--pri-doux)}
   .corps{padding:22px}
   .etapes{display:grid;gap:18px}
   body.comptable .etapes{grid-template-columns:minmax(0,1fr) minmax(0,1.25fr) minmax(0,1fr)}
   .etape{display:grid;gap:12px;align-content:start;min-width:0}
-  .etape-tete{display:flex;align-items:baseline;gap:10px}
-  .etape-tete .n{font-family:var(--f-chiffre);font-size:.78rem;color:var(--pri);background:var(--pri-doux);
-    border-radius:6px;padding:1px 7px}
-  .etape-tete h2{font-family:var(--f-titre);font-size:1.02rem;margin:0}
+  .etape-tete{display:flex;align-items:center;gap:10px}
+  .etape-tete .n{font-stretch:125%;font-weight:800;font-size:.85rem;color:#fff;background:var(--acc);border:2px solid var(--trait);
+    border-radius:8px;width:28px;height:28px;display:grid;place-items:center}
+  .etape-tete h2{font-stretch:125%;font-weight:800;font-size:1.02rem;margin:0}
   body:not(.comptable) .etape-tete, body:not(.comptable) .seul-comptable{display:none!important}
   .aide{color:var(--muted);font-size:.84rem;margin:0}
 
   /* Zones de dépôt */
-  .zone{border:1.5px dashed color-mix(in srgb,var(--pri) 45%,var(--line));border-radius:var(--r);
-    padding:34px 18px;text-align:center;cursor:pointer;background:color-mix(in srgb,var(--pri) 3%,var(--surface));
-    transition:background .15s,border-color .15s}
-  .zone:hover,.zone.survol{border-color:var(--pri);background:var(--pri-doux)}
+  .zone{border:2.5px dashed var(--trait);border-radius:var(--r);padding:34px 18px;text-align:center;cursor:pointer;
+    background:var(--surface2);transition:background .15s,transform .15s}
+  .zone:hover,.zone.survol{background:var(--pri-doux)}
   .zone.petite{padding:18px 14px}
-  .zone .ico{width:44px;height:44px;margin:0 auto 10px;border-radius:12px;display:grid;place-items:center;
-    background:var(--surface);border:1px solid var(--line);color:var(--pri)}
-  .zone .gros{font-weight:600}
+  .zone .ico{width:48px;height:48px;margin:0 auto 10px;border-radius:12px;display:grid;place-items:center;
+    background:var(--acc);border:2px solid var(--trait);box-shadow:var(--ombre-p);color:#fff}
+  .zone .gros{font-weight:700;font-size:1.02rem}
   .zone .petit{color:var(--muted);font-size:.84rem;margin-top:3px}
   ul.fichiers{list-style:none;padding:0;margin:0;display:grid;gap:6px}
-  ul.fichiers li,.puce{display:flex;align-items:center;gap:10px;padding:8px 11px;border:1px solid var(--line);
+  ul.fichiers li,.puce{display:flex;align-items:center;gap:10px;padding:8px 11px;border:2px solid var(--trait);
     border-radius:10px;font-size:.88rem;background:var(--surface);min-width:0}
   ul.fichiers li span.nom,.puce span.nom{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
   .x{margin-left:auto;border:0;background:transparent;color:var(--muted);cursor:pointer;font-weight:700;
     padding:2px 7px;border-radius:6px;flex:0 0 auto}
   .x:hover{background:var(--acc-doux);color:var(--acc)}
-  .ext{font-family:var(--f-chiffre);font-size:.7rem;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:0 5px}
+  .ext{font-family:var(--f-chiffre);font-size:.7rem;color:var(--ink);background:var(--pri-doux);border-radius:5px;padding:0 5px}
 
   /* Plan comptable */
-  .plan-etat{border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;display:grid;gap:8px;background:var(--surface2)}
-  .plan-etat.fourni{border-color:color-mix(in srgb,var(--pri) 45%,var(--line));background:var(--pri-doux)}
+  .plan-etat{border:2px solid var(--trait);border-radius:var(--r);padding:12px 14px;display:grid;gap:8px;background:var(--surface2)}
+  .plan-etat.fourni{background:var(--pri-doux);box-shadow:var(--ombre-p)}
   .plan-etat .ligne{display:flex;align-items:center;gap:8px;font-size:.9rem;flex-wrap:wrap}
-  .plan-etat b{font-weight:600}
+  .plan-etat b{font-weight:700}
   .comptes{display:flex;flex-wrap:wrap;gap:5px}
-  .compte{font-size:.76rem;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:2px 8px;
+  .compte{font-size:.76rem;border:1.5px solid var(--trait);background:var(--surface);border-radius:999px;padding:2px 8px;
     max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .compte code{font-family:var(--f-chiffre);color:var(--pri)}
-  .lien{border:0;background:none;color:var(--pri);font-weight:600;cursor:pointer;padding:0;font-size:.84rem;text-decoration:underline;text-underline-offset:2px}
-  .tous{max-height:180px;overflow:auto;border-top:1px solid var(--line);padding-top:8px;font-size:.82rem;display:grid;gap:3px}
+  .lien{border:0;background:none;color:var(--pri);font-weight:700;cursor:pointer;padding:0;font-size:.84rem;text-decoration:underline;text-underline-offset:2px}
+  .tous{max-height:180px;overflow:auto;border-top:1.5px solid var(--line);padding-top:8px;font-size:.82rem;display:grid;gap:3px}
   .tous div{display:flex;gap:8px} .tous code{font-family:var(--f-chiffre);color:var(--pri);min-width:3.5em}
 
   /* Options */
-  .option{display:flex;gap:12px;align-items:flex-start;border:1px solid var(--line);border-radius:12px;padding:11px 13px;
+  .option{display:flex;gap:12px;align-items:flex-start;border:2px solid var(--trait);border-radius:12px;padding:11px 13px;
     cursor:pointer;background:var(--surface)}
-  .option:hover{border-color:color-mix(in srgb,var(--pri) 50%,var(--line))}
+  .option:hover{background:var(--surface2)}
   .option b{display:block;font-size:.9rem}
   .option .aide{font-size:.8rem}
   .option svg{flex:0 0 20px;width:20px;height:20px;color:var(--pri);margin-top:1px}
   .option.continuer{border-style:dashed;padding:9px 12px} .option.continuer.choisi{border-style:solid}
-  .option.choisi{border-color:var(--pri);background:var(--pri-doux)}
-  .option .nomfic{font-size:.8rem;color:var(--pri-fort);font-weight:600;word-break:break-all}
-  .interrupteur{appearance:none;flex:0 0 36px;width:36px;height:20px;border-radius:999px;background:var(--line);position:relative;
-    cursor:pointer;margin:1px 0 0;transition:background .15s}
-  .interrupteur::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;
-    transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
-  .interrupteur:checked{background:var(--pri)} .interrupteur:checked::after{transform:translateX(16px)}
+  .option.choisi{background:var(--pri-doux);box-shadow:var(--ombre-p)}
+  .option .nomfic{font-size:.8rem;color:var(--pri-fort);font-weight:700;word-break:break-all}
+  .interrupteur{appearance:none;flex:0 0 40px;width:40px;height:22px;border-radius:999px;background:var(--line);position:relative;
+    cursor:pointer;margin:1px 0 0;border:2px solid var(--trait);transition:background .15s}
+  .interrupteur::after{content:"";position:absolute;top:1px;left:1px;width:16px;height:16px;border-radius:50%;background:#fff;
+    border:1.5px solid var(--trait);transition:transform .15s}
+  .interrupteur:checked{background:var(--pri)} .interrupteur:checked::after{transform:translateX(18px)}
 
   /* Action */
-  .actions{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:20px;padding-top:18px;border-top:1px solid var(--line)}
-  .btn{font-family:var(--f-titre);font-weight:600;border:0;border-radius:12px;padding:13px 22px;cursor:pointer;
-    display:inline-flex;align-items:center;gap:8px;text-decoration:none;font-size:.98rem}
-  .btn.pri{background:var(--pri);color:#fff} .btn.pri:hover{background:var(--pri-fort)}
-  :root[data-theme="dark"] .btn.pri{color:#06201A}
-  @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .btn.pri{color:#06201A} }
-  .btn.pri:disabled{opacity:.45;cursor:not-allowed}
-  .btn.sec{background:var(--surface);color:var(--pri);border:1px solid var(--line)} .btn.sec:hover{border-color:var(--pri)}
+  .actions{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:20px;padding-top:18px;border-top:2px dashed var(--line)}
+  .btn{font-family:var(--f-titre);font-stretch:125%;font-weight:800;border:2.5px solid var(--trait);border-radius:14px;padding:13px 22px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:8px;text-decoration:none;font-size:.98rem;transition:transform .1s,box-shadow .1s}
+  .btn.pri{background:var(--acc);color:#fff;box-shadow:4px 4px 0 var(--trait)}
+  .btn.pri:hover{transform:translate(-1px,-1px);box-shadow:5px 5px 0 var(--trait)}
+  .btn.pri:active{transform:translate(3px,3px);box-shadow:1px 1px 0 var(--trait)}
+  .btn.pri:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:2px 2px 0 var(--trait)}
+  .btn.sec{background:var(--surface);color:var(--ink);box-shadow:var(--ombre-p)} .btn.sec:hover{background:var(--pri-doux)}
   .etat{color:var(--muted);font-size:.9rem}
-  .spin{width:16px;height:16px;border:3px solid var(--line);border-top-color:var(--pri);border-radius:50%;
+  .spin{width:16px;height:16px;border:3px solid var(--line);border-top-color:var(--acc);border-radius:50%;
     animation:t .8s linear infinite;display:inline-block;vertical-align:-3px}
   @keyframes t{to{transform:rotate(360deg)}}
   @media (prefers-reduced-motion:reduce){.spin{animation:none}*{transition:none!important}}
   .quota-note{color:var(--muted);font-size:.84rem;margin-left:auto}
   .quota-note b{color:var(--ink)}
-  .err{color:var(--warn);font-size:.88rem;margin-top:12px}
+  .err{color:var(--warn);font-size:.88rem;margin-top:12px;font-weight:600}
   .err:empty{display:none}
 
   /* Résultats */
-  .resultats{margin-top:22px;background:var(--surface);border:1px solid var(--line);border-radius:20px;box-shadow:var(--ombre);padding:22px}
+  .resultats{margin-top:26px;background:var(--surface);border:2.5px solid var(--trait);border-radius:20px;box-shadow:var(--ombre);padding:22px}
   .res-tete{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}
-  .res-tete h2{font-family:var(--f-titre);font-size:1.25rem;margin:0}
+  .res-tete h2{font-stretch:125%;font-weight:800;font-size:1.25rem;margin:0}
   .res-tete .lie{color:var(--muted);font-size:.84rem}
   .tels{display:flex;gap:10px;flex-wrap:wrap}
-  .chiffres{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:18px 0}
-  .chiffre{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:var(--surface2)}
-  .chiffre span{display:block;font-size:.74rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:600}
+  .chiffres{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0}
+  .chiffre{border:2px solid var(--trait);border-radius:12px;padding:12px 14px;background:var(--surface2);box-shadow:var(--ombre-p)}
+  .chiffre span{display:block;font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:700}
   .chiffre b{font-family:var(--f-chiffre);font-size:1.15rem;font-weight:500;font-variant-numeric:tabular-nums}
   .verif{display:flex;gap:12px;align-items:center;flex-wrap:wrap;border-radius:12px;padding:11px 14px;margin-bottom:12px;
-    background:var(--pri-doux);font-size:.9rem}
-  .verif .pill{margin-left:auto;font-size:.78rem;font-weight:600;border-radius:999px;padding:3px 10px;background:var(--surface);color:var(--pri-fort);white-space:nowrap}
+    background:var(--pri-doux);border:2px solid var(--trait);font-size:.9rem}
+  .verif .pill{margin-left:auto;font-size:.78rem;font-weight:700;border-radius:999px;padding:3px 10px;background:var(--surface);
+    border:1.5px solid var(--trait);color:var(--pri-fort);white-space:nowrap}
   .verif .pill.encours{color:var(--muted)}
-  .table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
+  .table-wrap{overflow-x:auto;border:2px solid var(--trait);border-radius:12px}
   table{width:100%;border-collapse:collapse;font-size:.88rem;min-width:760px}
-  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
-  thead th{background:var(--surface2);color:var(--muted);font-weight:600;font-size:.74rem;letter-spacing:.06em;text-transform:uppercase}
+  th,td{padding:10px 12px;text-align:left;border-bottom:1.5px solid var(--line);vertical-align:top}
+  thead th{background:var(--pri);color:#fff;font-weight:700;font-size:.74rem;letter-spacing:.06em;text-transform:uppercase;border-bottom:2px solid var(--trait)}
   th.num{text-align:right} td.date{white-space:nowrap}
   td.num{text-align:right;font-family:var(--f-chiffre);font-variant-numeric:tabular-nums;white-space:nowrap}
   tbody tr:last-child td{border-bottom:0}
   .sous{color:var(--muted);font-size:.78rem;display:block;margin-top:2px}
   .al{color:var(--warn);font-size:.78rem;display:block;margin-top:2px}
-  select.choix{font:inherit;font-size:.86rem;width:100%;min-width:220px;padding:7px 9px;border:1px solid var(--line);
+  select.choix{font:inherit;font-size:.86rem;width:100%;min-width:220px;padding:7px 9px;border:2px solid var(--trait);
     border-radius:9px;background:var(--surface);color:var(--ink)}
-  select.choix.vide{border-color:var(--warn);background:var(--warn-doux)}
+  select.choix.vide{background:var(--warn-doux)}
   .marque{font-size:.74rem;color:var(--muted);display:block;margin-top:3px}
-  .marque.modif{color:var(--pri-fort);font-weight:600}
+  .marque.modif{color:var(--pri-fort);font-weight:700}
   .cumul{margin-top:14px;font-size:.88rem;line-height:1.7;color:var(--muted)}
   .cumul b{color:var(--ink);font-family:var(--f-chiffre);font-weight:500}
 
-  /* Comment ça marche + offre */
-  .comment{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:30px}
-  .pas{display:grid;gap:4px;font-size:.9rem}
-  .pas .n{font-family:var(--f-chiffre);color:var(--acc);font-size:.8rem}
-  .pas b{font-family:var(--f-titre)} .pas span{color:var(--muted)}
+  /* Offre */
   .offre{margin-top:30px;border-radius:20px;padding:24px;display:flex;gap:20px;align-items:center;justify-content:space-between;
-    flex-wrap:wrap;background:var(--ink);color:var(--surface)}
+    flex-wrap:wrap;background:var(--pri);color:#fff;border:2.5px solid var(--trait);box-shadow:var(--ombre)}
   .offre>div{flex:1 1 320px;min-width:0}
-  .offre .surtitre{color:var(--acc)}
-  .offre h3{font-family:var(--f-titre);font-size:1.25rem;margin:4px 0 6px}
-  .offre p{margin:0;opacity:.8;font-size:.92rem}
-  .offre .btn{background:var(--surface);color:var(--ink)}
+  .offre .surtitre{color:#FFD9C9}
+  .offre h3{font-stretch:125%;font-weight:800;font-size:1.25rem;margin:4px 0 6px}
+  .offre p{margin:0;opacity:.9;font-size:.92rem}
+  .offre .btn{background:#fff;color:#0B2B24;box-shadow:4px 4px 0 var(--trait)}
   .pied{color:var(--muted);font-size:.8rem;text-align:center;padding-block:28px 40px}
 
   @media (max-width:860px){
     body.comptable .etapes{grid-template-columns:1fr}
-    .comment{grid-template-columns:1fr}
+    .hero{grid-template-columns:1fr;gap:6px}
+    .illus{order:-1;height:220px;max-width:380px;width:100%;margin:0 auto}
+    .illus .recu{width:42%;height:180px;left:2%;top:10px;padding:12px}
+    .illus .feuille{width:52%;right:3%;bottom:14px}
+    .illus .fleche{left:auto;right:30%;top:40px;width:46px;height:46px}
   }
   @media (max-width:640px){
     /* Sur téléphone, chaque pièce devient une fiche : le compte reste visible. */
     table{min-width:0} thead{display:none}
-    tbody tr{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;padding:14px;border-bottom:1px solid var(--line)}
+    tbody tr{display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;padding:14px;border-bottom:1.5px solid var(--line)}
     tbody tr:last-child{border-bottom:0}
     td{border:0;padding:0;min-width:0} td.num{text-align:left} td.num:empty{display:none}
-    td::before{content:attr(data-l);display:block;font:600 .68rem var(--f-texte);color:var(--muted);
+    td::before{content:attr(data-l);display:block;font:700 .68rem var(--f-texte);color:var(--muted);
       text-transform:uppercase;letter-spacing:.06em}
     td.plein{grid-column:1/-1} select.choix{min-width:0}
     .tels{width:100%} .tels .btn{flex:1 1 auto;justify-content:center}
+    .pas-liste{gap:7px} .pas{padding:10px 9px} .pas b{font-size:.82rem} .pas span:last-child{font-size:.76rem}
   }
   @media (max-width:560px){
-    .modes{grid-template-columns:1fr} .mode+.mode{border-left:0;border-top:1px solid var(--line)}
+    .modes{grid-template-columns:1fr 1fr} .mode{padding:12px} .mode span{display:none} .mode svg{display:none}
     .statut span:last-child{display:none} .corps{padding:16px} .quota-note{margin-left:0}
+    #btn{width:100%;justify-content:center}
   }
 </style>
 </head>
@@ -697,7 +720,7 @@ _PAGE = r"""<!DOCTYPE html>
       <rect x="24" y="22" width="8.5" height="8.5" rx="2" fill="var(--acc)"/>
       <path d="M28.25 22v8.5M24 26.25h8.5" stroke="#fff" stroke-width="1.1"/>
     </svg>
-    <span>Factur<b>o</b></span>
+    <span>Facturo</span>
   </a>
   <div class="droite">
     <span class="statut"><span id="pastille" class="pastille"></span><span id="txtStatut" data-i18n="statut_check">Vérification…</span></span>
@@ -710,9 +733,23 @@ _PAGE = r"""<!DOCTYPE html>
 
 <main class="conteneur">
   <section class="hero">
-    <span class="surtitre" data-i18n="surtitre">Bilingue · TPS, TVQ, TVH · QuickBooks Online</span>
-    <h1 data-i18n="hero">Vos reçus et factures, en Excel prêt pour la comptabilité.</h1>
-    <p data-i18n="sous">Déposez des photos ou des PDF. Facturo lit le fournisseur, la date, les taxes et les montants, puis range chaque pièce dans le bon compte.</p>
+    <div class="hero-texte">
+      <span class="surtitre" data-i18n="surtitre">Bilingue · TPS, TVQ, TVH · QuickBooks Online</span>
+      <h1 data-i18n="hero">Reçus in, Excel out.</h1>
+      <p data-i18n="sous">Fini la saisie à la main. Prenez vos reçus et factures en photo : Facturo en fait un fichier Excel propre, avec la TPS, la TVQ ou la TVH séparées, prêt pour votre comptable.</p>
+      <div class="pas-liste">
+        <div class="pas"><span class="n">1</span><b data-i18n="p1t">Photo ou PDF</b><span data-i18n="p1d">Un reçu ou tout un lot, en français ou en anglais.</span></div>
+        <div class="pas"><span class="n">2</span><b data-i18n="p2t">Lecture auto</b><span data-i18n="p2d">Fournisseur, date, taxes, total.</span></div>
+        <div class="pas"><span class="n">3</span><b data-i18n="p3t">Excel prêt</b><span data-i18n="p3d">À garder, à continuer ou à donner au comptable.</span></div>
+      </div>
+    </div>
+    <div class="illus" aria-hidden="true">
+      <div class="recu"><i></i><i></i><i style="width:80%"></i><i style="width:88%"></i><i style="width:60%"></i>
+        <div class="tx"><span>TPS+TVQ</span><em>2,93</em></div></div>
+      <div class="feuille"><span class="t" data-i18n="ill_f">Fourn.</span><span class="t" data-i18n="ill_t">Taxes</span><span class="t">Total</span>
+        <span>Boul.</span><span>2,93</span><span>22,43</span><span>Garage</span><span>85,21</span><span>654,21</span></div>
+      <div class="fleche"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></div>
+    </div>
   </section>
 
   <section class="atelier">
@@ -799,12 +836,6 @@ _PAGE = r"""<!DOCTYPE html>
     <div id="cumul" class="cumul masque"></div>
   </section>
 
-  <section class="comment">
-    <div class="pas"><span class="n">01</span><b data-i18n="p1t">Déposez</b><span data-i18n="p1d">Photos ou PDF, en lot, en français ou en anglais.</span></div>
-    <div class="pas"><span class="n">02</span><b data-i18n="p2t">Facturo lit tout</b><span data-i18n="p2d">Fournisseur, date, TPS, TVQ ou TVH, lignes, compte comptable.</span></div>
-    <div class="pas"><span class="n">03</span><b data-i18n="p3t">Vérifiez et téléchargez</b><span data-i18n="p3d">Un Excel propre, et en option un fichier pour QuickBooks Online.</span></div>
-  </section>
-
   <section id="offre" class="offre">
     <div>
       <span class="surtitre" data-i18n="offre_tag">Facturo Pro</span>
@@ -820,8 +851,8 @@ _PAGE = r"""<!DOCTYPE html>
 const I18N = {
   fr:{ statut_check:"Vérification…", statut_on:"Service en ligne", statut_off:"Service indisponible",
     surtitre:"Bilingue · TPS, TVQ, TVH · QuickBooks Online",
-    hero:"Vos reçus et factures, en Excel prêt pour la comptabilité.",
-    sous:"Déposez des photos ou des PDF. Facturo lit le fournisseur, la date, les taxes et les montants, puis range chaque pièce dans le bon compte.",
+    hero:"Reçus in, Excel out.", ill_f:"Fourn.", ill_t:"Taxes",
+    sous:"Fini la saisie à la main. Prenez vos reçus et factures en photo : Facturo en fait un fichier Excel propre, avec la TPS, la TVQ ou la TVH séparées, prêt pour votre comptable.",
     mode_simple:"Usage simple", mode_simple_d:"Déposez vos reçus, téléchargez l'Excel.",
     mode_comptable:"Mode comptable", mode_comptable_d:"Votre plan comptable, vérification des comptes, QuickBooks, relevé bancaire.",
     e_plan:"Votre plan comptable", e_pieces:"Vos pièces", e_options:"Options",
@@ -845,9 +876,9 @@ const I18N = {
     regroupe:"regroupé avec", pieces:"pièce(s)", aucune:"Aucune donnée n'a pu être extraite.", reseau:"Erreur réseau : ",
     quota:"Limite de la démo atteinte pour aujourd'hui. Revenez demain !",
     gratuit:"Version gratuite", par_jour:"fichiers par jour", restants:"restant(s) aujourd'hui", voir_pro:"Facturo Pro",
-    p1t:"Déposez", p1d:"Photos ou PDF, en lot, en français ou en anglais.",
-    p2t:"Facturo lit tout", p2d:"Fournisseur, date, TPS, TVQ ou TVH, lignes, compte comptable.",
-    p3t:"Vérifiez et téléchargez", p3d:"Un Excel propre, et en option un fichier pour QuickBooks Online.",
+    p1t:"Photo ou PDF", p1d:"Un reçu ou tout un lot, en français ou en anglais.",
+    p2t:"Lecture auto", p2d:"Fournisseur, date, taxes, total.",
+    p3t:"Excel prêt", p3d:"À garder, à continuer ou à donner au comptable.",
     offre_tag:"Facturo Pro", offre_titre:"Une version sur mesure pour votre entreprise",
     offre_texte:"Plus de volume, votre plan comptable et vos fichiers Excel existants, un format adapté à votre logiciel comptable, un accès privé pour votre équipe. Conçu et accompagné par un consultant bilingue basé à Ottawa.",
     offre_btn:"Discuter de mon besoin", mail_sujet:"Facturo Pro — demande d'information",
@@ -858,8 +889,8 @@ const I18N = {
     cumul:"Total du fichier", dont_taxes:"dont taxes", nb_fact:"facture(s) depuis le début" },
   en:{ statut_check:"Checking…", statut_on:"Service online", statut_off:"Service unavailable",
     surtitre:"Bilingual · GST, QST, HST · QuickBooks Online",
-    hero:"Your receipts and invoices, in an accounting-ready Excel file.",
-    sous:"Drop photos or PDFs. Facturo reads the vendor, date, taxes and amounts, then files each document under the right account.",
+    hero:"Receipts in, Excel out.", ill_f:"Vendor", ill_t:"Tax",
+    sous:"No more typing receipts by hand. Snap your receipts and invoices: Facturo turns them into a clean Excel file, with GST, QST or HST split out, ready for your accountant.",
     mode_simple:"Simple use", mode_simple_d:"Drop your receipts, download the Excel.",
     mode_comptable:"Accountant mode", mode_comptable_d:"Your chart of accounts, account review, QuickBooks, bank statement.",
     e_plan:"Your chart of accounts", e_pieces:"Your documents", e_options:"Options",
@@ -883,9 +914,9 @@ const I18N = {
     regroupe:"merged with", pieces:"document(s)", aucune:"No data could be extracted.", reseau:"Network error: ",
     quota:"Today's demo limit has been reached. Please come back tomorrow!",
     gratuit:"Free version", par_jour:"files per day", restants:"left today", voir_pro:"Facturo Pro",
-    p1t:"Drop", p1d:"Photos or PDFs, in batches, in English or French.",
-    p2t:"Facturo reads it all", p2d:"Vendor, date, GST, QST or HST, line items, account.",
-    p3t:"Review and download", p3d:"A clean Excel, and optionally a file for QuickBooks Online.",
+    p1t:"Photo or PDF", p1d:"One receipt or a whole batch, in English or French.",
+    p2t:"Auto reading", p2d:"Vendor, date, taxes, total.",
+    p3t:"Excel ready", p3d:"Keep it, add to it, or hand it to your accountant.",
     offre_tag:"Facturo Pro", offre_titre:"A custom version for your business",
     offre_texte:"More volume, your chart of accounts and existing Excel files, output tailored to your accounting software, private access for your team. Built and supported by a bilingual consultant based in Ottawa.",
     offre_btn:"Discuss my needs", mail_sujet:"Facturo Pro — information request",
